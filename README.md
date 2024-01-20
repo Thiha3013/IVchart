@@ -1,6 +1,6 @@
 # IVchart
 
-## Calculates implied volatility of a input ticker and displays a bar chart comparing call implied volatility, put implied volatility, average implied volatility and historical volatility of the stock in current date using the data from past 30 days. 
+### Calculates implied volatility of a input ticker and displays a bar chart comparing call implied volatility, put implied volatility, average implied volatility and historical volatility of the stock in current date using the data from past 30 days. 
 
 
 ## how the program works
