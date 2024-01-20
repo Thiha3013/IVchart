@@ -2,6 +2,9 @@
 
 ## Calculates implied volatility of a input ticker and displays a bar chart comparing call implied volatility, put implied volatility, average implied volatility and historical volatility of the stock in current date using the data from past 30 days. 
 
+
+## how the program works
+
 The program uses Black-Sholes model, to calculate Black-Scholes option price of a given stock. The output is in turn provided into a function that uses Newton method to approximate the implied volatility. 
 
 ## To use the tool
