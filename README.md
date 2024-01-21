@@ -1,6 +1,6 @@
 # IVchart
 
-### Calculates implied volatility of a input ticker and displays a bar chart comparing call implied volatility, put implied volatility, average implied volatility and historical volatility of the stock in current date using the data from past 30 days. 
+#### Calculates implied volatility of a input ticker and displays a bar chart comparing call implied volatility, put implied volatility, average implied volatility and historical volatility of the stock in current date using the data from past 30 days. 
 
 
 ## how the program works
@@ -11,7 +11,7 @@ The program uses Black-Sholes model, to calculate Black-Scholes option price of 
 
 1. git clone https://github.com/Thiha3013/IVchart
 2. run app.exe on Windows or python app.py on MacOS
-3. input any ticker on GUI to create the chart
+3. input any ticker on GUI to create the char#
 
 ## Work in progess / Known issues
 
