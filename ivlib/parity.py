@@ -105,8 +105,13 @@ def implied_forward(K, call_mid, put_mid, group=None, weights=None, trim=True):
     slope, intercept, n, r2 = _grouped_wls(K, y, w, group, ngroups)
 
     if trim:
-        pred = intercept[group] + slope[group] * K
-        resid = np.abs(y - pred)
+        # Degenerate groups (too few strikes, zero variance in K) carry NaN
+        # slopes; they are flagged via `ok` below and their residuals are
+        # simply not used, so the NaN arithmetic here is expected.
+        with np.errstate(invalid="ignore"):
+            pred = intercept[group] + slope[group] * K
+        with np.errstate(invalid="ignore"):
+            resid = np.abs(y - pred)
         # Robust scale per group: median absolute residual, via a sort-free
         # approximation using the weighted mean of |resid|, scaled up.
         scale = np.bincount(group, w * resid, ngroups) / np.maximum(
