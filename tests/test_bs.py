@@ -94,3 +94,22 @@ def test_vectorizes_over_arrays():
     px = bs.call_price(100.0, K, 0.3, T30)
     assert px.shape == (1000,)
     assert np.all(np.diff(px) < 0)  # calls cheapen as strike rises
+
+
+def test_scipy_stats_norm_is_not_used_in_the_hot_path():
+    """The normal CDF is scipy.special.ndtr, not scipy.stats.norm.cdf.
+
+    These compute the same function, but scipy.stats.norm.cdf wraps ndtr in
+    distribution-object machinery. In a scalar loop that wrapper dominates:
+    swapping it for a direct erf call alone is a ~58x speedup on the benchmark
+    ladder, larger than the win from vectorizing. Guarding against a well-meaning
+    'use the standard scipy API' edit.
+    """
+    import inspect
+
+    src = inspect.getsource(bs)
+    # Check the imports, not the prose -- the module comment names
+    # scipy.stats.norm.cdf precisely in order to explain why it is avoided.
+    assert "from scipy.stats" not in src
+    assert "import scipy.stats" not in src
+    assert "from scipy.special import ndtr" in src

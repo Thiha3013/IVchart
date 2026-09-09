@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ivlib import bs
+from ivlib import bs, seed as _seed
 
 SIGMA_MIN = 1e-6
 SIGMA_MAX = 5.0        # 500% vol -- far beyond any real listed equity option
@@ -85,6 +85,7 @@ def initial_guess(target, F, K, T, df=1.0):
 def implied_vol(
     target, F, K, T, df=1.0, is_call=True,
     tol=DEFAULT_TOL, max_iter=DEFAULT_MAX_ITER, return_info=False,
+    seed_fn=None,
 ):
     """Invert Black-76 for sigma. Fully vectorized, safeguarded Newton.
 
@@ -117,7 +118,13 @@ def implied_vol(
         return (sigma, empty) if return_info else sigma
 
     t, f, k, tt, d, c = (a[ok] for a in (target, F, K, T, df, is_call))
-    s = initial_guess(t, f, k, tt, d)
+    if seed_fn is None:
+        s = initial_guess(t, f, k, tt, d)
+    elif seed_fn is _seed.corrado_miller:
+        s = seed_fn(t, f, k, tt, d, c)
+    else:
+        s = seed_fn(t, f, k, tt, d)
+    s = np.clip(s, SIGMA_MIN, SIGMA_MAX)
     lo = np.full(s.shape, SIGMA_MIN)
     hi = np.full(s.shape, SIGMA_MAX)
     converged = np.zeros(s.shape, dtype=bool)
