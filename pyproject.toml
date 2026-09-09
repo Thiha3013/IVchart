@@ -1,0 +1,17 @@
+[project]
+name = "ivlib"
+version = "0.1.0"
+description = "Vectorized implied volatility engine for equity options"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "pandas>=2.0", "scipy>=1.10"]
+
+[project.optional-dependencies]
+bench = ["matplotlib>=3.7", "pyarrow>=14.0"]
+dev = ["pytest>=7.4"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,17 +1,23 @@
-# Ignore Mac system files
-.DS_store
+# macOS
+.DS_Store
 
-# Ignore node_modules folder
-node_modules
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
 
-# Ignore all text files
-*.txt
-
-# Ignore files related to API keys
+# Secrets
 .env
 
-# Ignore SASS config files
-.sass-cache
+# PyInstaller build output
+build/
+dist/
+*.spec
 
-#ignore venv
-venv
+# Data (large / regenerable)
+*.parquet
+aapl_2021_2023.csv
