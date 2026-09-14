@@ -218,3 +218,25 @@ def test_implied_series_one_row_per_stored_day():
 
 def test_implied_series_empty_input():
     assert compute.implied_series(pd.DataFrame()).empty
+
+
+# ------------------------------------------------------------------ watchlist add
+
+def test_add_to_watchlist_validates_and_appends(tmp_path, monkeypatch):
+    p = tmp_path / "w.txt"
+    p.write_text("AAPL\n")
+    monkeypatch.setattr(yahoo, "fetch", lambda t, **kw: synth_chain(ticker=t))
+    added, msg = snapshot.add_to_watchlist("nvda", p)
+    assert added and snapshot.load_watchlist(p) == ["AAPL", "NVDA"]
+    added, _ = snapshot.add_to_watchlist("NVDA", p)          # idempotent
+    assert not added and snapshot.load_watchlist(p) == ["AAPL", "NVDA"]
+
+
+def test_add_to_watchlist_rejects_unknown_and_garbage(tmp_path, monkeypatch):
+    p = tmp_path / "w.txt"
+    def fake(t, **kw):
+        raise yahoo.ChainUnavailable(f"{t}: no listed options")
+    monkeypatch.setattr(yahoo, "fetch", fake)
+    assert not snapshot.add_to_watchlist("ZZZZ", p)[0]
+    assert not snapshot.add_to_watchlist("../etc", p)[0]
+    assert not p.exists() or snapshot.load_watchlist(p) == []

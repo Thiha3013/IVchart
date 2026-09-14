@@ -43,6 +43,29 @@ def load_watchlist(path: Path = WATCHLIST) -> list[str]:
     return out
 
 
+def add_to_watchlist(ticker: str, path: Path = WATCHLIST) -> tuple[bool, str]:
+    """Append a ticker so the daily job starts tracking it. Validates it first.
+
+    Returns (added, detail). A ticker that is already listed, or that Yahoo has
+    no options for, is not added.
+    """
+    ticker = ticker.upper().strip()
+    if not ticker.isalnum() or len(ticker) > 6:
+        return False, f"{ticker!r} is not a ticker symbol"
+    if ticker in load_watchlist(path):
+        return False, f"{ticker} is already on the watchlist"
+    try:
+        yahoo.fetch(ticker, max_expiries=1)
+    except yahoo.ChainUnavailable as e:
+        return False, str(e)
+    except Exception as e:
+        return False, f"{ticker}: could not verify ({type(e).__name__})"
+    lines = path.read_text().splitlines() if path.exists() else []
+    lines.append(ticker)
+    path.write_text("".join(line + chr(10) for line in lines))
+    return True, f"{ticker} added -- history starts with the next snapshot"
+
+
 def snapshot_one(ticker: str, force: bool = False) -> tuple[str, str]:
     """Returns (status, detail). status in {'stored', 'skipped', 'failed'}."""
     try:
