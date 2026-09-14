@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ivlib import bs, surface
+from ivlib import pricing as bs, surface
 
 
 def synth_chain(dates=("2022-01-03",), dtes=(14, 30, 90), n_strikes=21, spot=150.0):

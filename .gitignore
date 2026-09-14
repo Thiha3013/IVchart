@@ -20,10 +20,10 @@ dist/
 
 # Data (large / regenerable)
 *.parquet
-aapl_2021_2023.csv
+data/vendor/aapl_2021_2023.csv
 # ...except stored chain snapshots, which are the dataset itself
 !data/chains/**/*.parquet
 # ...and the ingested vendor CSV (9 MB). Committed so deploys and CI get AAPL's
 # 2021-23 history without touching git LFS (the 195 MB CSV is LFS; its 1 GB/mo
 # bandwidth quota would be exhausted by a week of daily redeploys).
-!aapl_2021_2023.parquet
+!data/vendor/aapl_2021_2023.parquet

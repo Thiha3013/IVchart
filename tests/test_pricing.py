@@ -1,14 +1,9 @@
-"""Tests for the Black-76 pricing core.
-
-The day-count tests are the important ones. They exist because the original
-implementation divided a *calendar* day count by 252 (a *trading* day count),
-which is the single largest source of error in the old results.
-"""
+"""Black-76 pricing, day count, initial guesses."""
 
 import numpy as np
 import pytest
 
-from ivlib import bs
+from ivlib import pricing as bs, solver
 
 T30 = bs.year_fraction(30)
 
@@ -36,7 +31,7 @@ def test_mixed_convention_biases_implied_vol_low_by_0_8309():
     The recovered vol should come back low by sqrt(365/252) -- and the bias is
     strike-independent, because it is a pure rescaling of total variance.
     """
-    from ivlib.solver import implied_vol  # noqa: PLC0415
+    from ivlib.solver import implied_vol
 
     true_sigma, F, df = 0.30, 100.0, 1.0
     for K in (90.0, 100.0, 110.0):

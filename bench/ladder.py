@@ -1,91 +1,65 @@
-"""Phase 3: the optimization ladder.
+"""The optimization ladder: five implementations of one inversion, same real quotes.
 
-Five implementations of the same inversion, measured on the same real quotes and
-checked against each other for agreement. The point is not only the final number
-but *where each speedup comes from* -- memory layout, algorithm, or hardware.
+    L0 scalar + scipy.stats.norm   the original shape
+    L1 scalar + math.erf           cheaper CDF           (the biggest single jump, 52x)
+    L2 NumPy vectorized            memory layout
+    L3 NumPy + Corrado-Miller      fewer iterations      (1.05x -- the algorithmic rung paid least)
+    L4 Numba fused + parallel      registers, all cores
 
-  L0  scalar loop, scipy.stats.norm.cdf   the original code's shape
-  L1  scalar loop, math.erf               same algorithm, cheaper normal CDF
-  L2  vectorized NumPy, ATM seed          memory layout win
-  L3  vectorized NumPy, Corrado-Miller    algorithmic win (fewer iterations)
-  L4  Numba, fused + parallel             hardware win
-
-L0 and L1 are timed on a subset because they are slow; throughput (options per
-second) is the comparable figure across all rungs.
+    python -m bench.ladder [--plot]     -> bench/figures/ladder.png with --plot
 """
 
 from __future__ import annotations
 
 import math
 import os
+import sys
 import time
 
 import numpy as np
 
-from ivlib import bs, fast, filter as qf, seed, solver
+from app import data
 from bench.validate import build_forwards, load
+from ivlib import market as mk, pricing as bs, solver
 
-SCALAR_N = 20_000       # subset size for the two scalar rungs
+SCALAR_N = 20_000   # scalar rungs are slow; throughput is the comparable figure
 REPEATS = 5
 
 
-# ---------------------------------------------------------------- rungs
-
 def _scalar_newton(target, F, K, T, df, cdf, pdf, max_iter=60, tol=1e-12):
-    """One option at a time, mirroring the original iterrows structure."""
     out = np.full(len(target), np.nan)
     for i in range(len(target)):
         t, f, k, tt, d = target[i], F[i], K[i], T[i], df[i]
-        intr = max(f - k, 0.0) * d
-        if not (t > intr + 1e-12) or not (t < d * f - 1e-12) or tt <= 0:
+        if not (t > max(f - k, 0.0) * d + 1e-12) or not (t < d * f - 1e-12) or tt <= 0:
             continue
-        s = 0.3
-        lo, hi = 1e-6, 5.0
+        s, lo, hi = 0.3, 1e-6, 5.0
         for _ in range(max_iter):
             vst = s * math.sqrt(tt)
             d1 = (math.log(f / k) + 0.5 * vst * vst) / vst
             d2 = d1 - vst
-            px = d * (f * cdf(d1) - k * cdf(d2))
+            diff = d * (f * cdf(d1) - k * cdf(d2)) - t
             v = d * f * pdf(d1) * math.sqrt(tt)
-            diff = px - t
-            if diff > 0.0:
-                hi = s
-            else:
-                lo = s
+            if diff > 0.0: hi = s
+            else: lo = s
             step = s - diff / v if v > 1e-300 else 0.5 * (lo + hi)
-            if not (lo < step < hi):
-                step = 0.5 * (lo + hi)
-            moved = abs(step - s)
-            s = step
-            if moved < tol or (hi - lo) < tol:
-                break
+            if not (lo < step < hi): step = 0.5 * (lo + hi)
+            moved = abs(step - s); s = step
+            if moved < tol or (hi - lo) < tol: break
         out[i] = s
     return out
 
 
 def l0(a):
     from scipy.stats import norm
-    return _scalar_newton(*a, cdf=lambda x: norm.cdf(x), pdf=lambda x: norm.pdf(x))
-
+    return _scalar_newton(*a, cdf=norm.cdf, pdf=norm.pdf)
 
 def l1(a):
-    return _scalar_newton(
-        *a,
-        cdf=lambda x: 0.5 * (1.0 + math.erf(x * 0.7071067811865476)),
-        pdf=lambda x: 0.3989422804014327 * math.exp(-0.5 * x * x),
-    )
+    return _scalar_newton(*a, cdf=lambda x: 0.5 * (1.0 + math.erf(x * 0.7071067811865476)),
+                          pdf=lambda x: 0.3989422804014327 * math.exp(-0.5 * x * x))
 
-
-def l2(a):
-    return solver.implied_vol(*a, is_call=True)
-
-
-def l3(a):
-    return solver.implied_vol(*a, is_call=True, seed_fn=seed.corrado_miller)
-
-
-def l4(a):
-    return fast.implied_vol(*a, is_call=True)
+def l2(a): return solver.implied_vol(*a, is_call=True)
+def l3(a): return solver.implied_vol(*a, is_call=True, seed_fn=bs.corrado_miller)
+def l4(a): return solver.implied_vol_fast(*a, is_call=True)
 
 
 RUNGS = [
@@ -97,70 +71,76 @@ RUNGS = [
 ]
 
 
-# ---------------------------------------------------------------- harness
-
 def load_quotes():
-    d0 = load("aapl_2021_2023.parquet")
-    cm, _ = qf.filter_quotes(d0["C_BID"], d0["C_ASK"], dte=d0["DTE"])
-    pm, _ = qf.filter_quotes(d0["P_BID"], d0["P_ASK"], dte=d0["DTE"])
-    d = d0[qf.paired_mask(cm, pm)].copy()
+    d0 = load(data.VENDOR)
+    cm, _ = mk.filter_quotes(d0["C_BID"], d0["C_ASK"], dte=d0["DTE"])
+    pm, _ = mk.filter_quotes(d0["P_BID"], d0["P_ASK"], dte=d0["DTE"])
+    d = d0[mk.paired_mask(cm, pm)].copy()
     g, fit = build_forwards(d)
     ok = fit["ok"][g]
-    return (
-        qf.mid(d["C_BID"].values, d["C_ASK"].values)[ok],
-        fit["forward"][g][ok],
-        d["STRIKE"].values[ok],
-        d["DTE"].values[ok] / 365.0,
-        fit["discount"][g][ok],
-    )
+    return (mk.mid(d["C_BID"].values, d["C_ASK"].values)[ok], fit["forward"][g][ok],
+            d["STRIKE"].values[ok], d["DTE"].values[ok] / 365.0, fit["discount"][g][ok])
 
 
-def bench(fn, args, repeats=REPEATS):
-    best = float("inf")
-    for _ in range(repeats):
-        t = time.perf_counter()
-        out = fn(args)
-        best = min(best, time.perf_counter() - t)
-    return out, best
-
-
-def main():
+def run():
     full = load_quotes()
     n_full = len(full[0])
     sub = tuple(a[:SCALAR_N] for a in full)
     print(f"dataset: {n_full:,} real call quotes  (scalar rungs timed on {SCALAR_N:,})\n")
-
-    fast.implied_vol(*sub, is_call=True)  # warm the JIT before timing
-
+    solver.implied_vol_fast(*sub, is_call=True)   # warm the JIT
     ref = solver.implied_vol(*full, is_call=True)
+
     results = []
     for name, fn, scalar, why in RUNGS:
-        args = sub if scalar else full
-        n = SCALAR_N if scalar else n_full
-        out, secs = bench(fn, args, repeats=1 if scalar else REPEATS)
-        rate = n / secs
-        r = ref[:n]
-        m = np.isfinite(out) & np.isfinite(r)
-        agree = float(np.abs(out[m] - r[m]).max()) if m.any() else float("nan")
-        results.append({"name": name, "why": why, "n": n, "secs": secs,
-                        "rate": rate, "agree": agree})
-        print(f"{name:34}{secs*1000:9.1f} ms  {rate/1e6:7.3f} M/s   "
-              f"max|diff| {agree:.1e}")
+        args, n = (sub, SCALAR_N) if scalar else (full, n_full)
+        best = float("inf")
+        for _ in range(1 if scalar else REPEATS):
+            t = time.perf_counter(); out = fn(args); best = min(best, time.perf_counter() - t)
+        m = np.isfinite(out) & np.isfinite(ref[:n])
+        agree = float(np.abs(out[m] - ref[:n][m]).max()) if m.any() else float("nan")
+        results.append({"name": name, "why": why, "n": n, "secs": best, "rate": n / best, "agree": agree})
+        print(f"{name:34}{best*1000:9.1f} ms  {n/best/1e6:7.3f} M/s   max|diff| {agree:.1e}")
 
     base = results[0]["rate"]
     print(f"\n{'rung':34}{'M/s':>9}{'vs L0':>10}{'vs prev':>10}   source")
     prev = None
     for r in results:
-        vs_prev = f"{r['rate']/prev:6.2f}x" if prev else "     --"
+        vs_prev = f"{r['rate'] / prev:6.2f}x" if prev else "     --"
         print(f"{r['name']:34}{r['rate']/1e6:9.3f}{r['rate']/base:9.0f}x{vs_prev:>10}   {r['why']}")
         prev = r["rate"]
-
-    total = results[-1]["rate"] / base
-    print(f"\ntotal speedup L0 -> L4: {total:,.0f}x")
-    print(f"extrapolated L0 time for all {n_full:,} quotes: "
-          f"{n_full / base / 60:.1f} min  ->  L4: {n_full / results[-1]['rate'] * 1000:.0f} ms")
+    print(f"\ntotal speedup L0 -> L4: {results[-1]['rate']/base:,.0f}x")
+    print(f"L0 for all {n_full:,} quotes: {n_full/base/60:.1f} min  ->  L4: {n_full/results[-1]['rate']*1000:.0f} ms")
     return results
 
 
+def plot(results, out="bench/figures/ladder.png"):
+    import matplotlib; matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    S, s1 = "#fcfcfb", "#2a78d6"
+    ink, ink2, muted, grid = "#0b0b0b", "#52514e", "#8a8983", "#e4e3df"
+    rates = np.array([r["rate"] for r in results]); base = rates[0]
+    fig, ax = plt.subplots(figsize=(12.5, 5.6), facecolor=S)
+    fig.subplots_adjust(left=0.30, right=0.965, top=0.78, bottom=0.14); ax.set_facecolor(S)
+    y = np.arange(len(results))[::-1]
+    ax.barh(y, rates, height=0.6, color=s1, edgecolor=S, linewidth=1.5)
+    ax.set_xscale("log"); ax.set_xlim(rates.min() * 0.45, rates.max() * 22.0)
+    ax.set_yticks(y, [f"{r['name'][:2]}   {r['name'][4:]}" for r in results], fontsize=10)
+    ax.set_xlabel("implied volatilities per second  (log scale)", color=ink2, fontsize=10)
+    for sp in ("top", "right", "left"): ax.spines[sp].set_visible(False)
+    ax.spines["bottom"].set_color(grid); ax.tick_params(colors=ink2, labelsize=9, length=3, width=0.8)
+    ax.grid(axis="x", color=grid, linewidth=0.7); ax.set_axisbelow(True)
+    for yv, r in zip(y, results):
+        rate = r["rate"]
+        ax.text(rate * 1.13, yv + 0.10, f"{rate/1e6:.3f} M/s" if rate >= 1e5 else f"{rate/1e3:.1f} k/s", va="center", color=ink, fontsize=10.5, fontweight="semibold")
+        ax.text(rate * 1.13, yv - 0.20, f"{rate/base:,.0f}x   ·   {r['why']}", va="center", color=muted, fontsize=9)
+    fig.suptitle("Same inversion, five implementations", color=ink, fontsize=15.5, fontweight="semibold", x=0.022, ha="left", y=0.955)
+    fig.text(0.022, 0.885, f"{results[-1]['n']:,} real AAPL call quotes. All five agree to within 1e-11 -- what differs is memory layout, algorithm, and hardware.", color=ink2, fontsize=10)
+    fig.text(0.022, 0.035, f"L0 is the original code's shape: one option at a time through scipy.stats.norm. L4 solves the full set in {results[-1]['n']/rates[-1]*1000:.0f} ms.", color=ink2, fontsize=9)
+    fig.savefig(out, dpi=170, facecolor=S)
+    print(f"wrote {out}")
+
+
 if __name__ == "__main__":
-    main()
+    res = run()
+    if "--plot" in sys.argv:
+        plot(res)

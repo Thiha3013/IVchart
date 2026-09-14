@@ -3,7 +3,7 @@
 # Runs twice on weekdays, 30 minutes before the close in each of EDT and EST
 # (GitHub cron is UTC and does not know about US daylight time). Whichever run
 # lands inside regular hours stores the chains; the other is skipped by the
-# market-state guard in app/snapshot.py, and a second in-hours run the same day
+# market-state guard in app/pipeline.py, and a second in-hours run the same day
 # is a no-op because the day is already stored. The 30-minute buffer is for
 # scheduler delay, which can run to tens of minutes.
 #
@@ -47,7 +47,7 @@ jobs:
         run: pip install -e ".[app]"
 
       - name: snapshot watchlist
-        run: python -m app.snapshot
+        run: python -m app.pipeline snapshot
 
       - name: commit new chains
         run: |
