@@ -21,3 +21,5 @@ dist/
 # Data (large / regenerable)
 *.parquet
 aapl_2021_2023.csv
+# ...except stored chain snapshots, which are the dataset itself
+!data/chains/**/*.parquet

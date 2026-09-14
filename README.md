@@ -99,7 +99,53 @@ points cannot agree with anyone to better than 10 vol points.
 262,752 implied volatilities across 570 trading days — 563× the 467 points the
 original version produced, because a scalar loop could not afford the rest.
 
-## Running it
+## The app: implied vs realized, any ticker, over time
+
+```bash
+pip install -e ".[app]"
+streamlit run app/ui.py
+```
+
+Type a ticker. You get 30-day implied vol (solved by ivlib from the live chain)
+against 21-day realized vol (from price history), today's smile by expiry, and a
+funnel showing what fraction of the chain was usable.
+
+**How history works.** There is no free source of historical option chains, so
+the app builds its own: `app/snapshot.py` fetches the chain for every ticker in
+`app/watchlist.txt` once per trading day and stores it under `data/chains/`.
+A GitHub Actions cron (`.github/workflows/snapshot.yml`) runs it 30 minutes
+before the close and commits the result, so the dataset grows without any
+machine of yours being on. Implied history for a ticker starts the day it is
+added to the watchlist. Realized vol is full-length from day one for any ticker.
+
+Three shortcuts to a non-empty chart on day one:
+
+- **AAPL** has 2021-2023 from the vendor CSV this engine was validated on.
+- **AAPL, AMZN, GOOG, GS, IBM** have Cboe's VIX-methodology vol indices, via
+  FRED, back to 2010. Not the same quantity as ATM vol -- it is a variance-strip
+  rate that prices in the skew, so it runs higher -- but it tracks (AAPL:
+  correlation 0.98 over 561 days) and is a second independent check on the engine.
+- If you ever want deep history for arbitrary names, one month of a paid chain
+  API (Alpha Vantage ~$50, ThetaData ~$40) is enough to backfill years for a
+  watchlist through this same engine, then cancel.
+
+Two rules the snapshot job enforces, both learned from the data: it refuses to
+store a chain captured outside regular hours (Yahoo returns bid = ask = 0 then),
+and it never uses Yahoo's own `impliedVolatility` field, which is a placeholder
+(0.00001 on every ITM contract). Bid/ask in, our own vol out.
+
+```
+app/
+  sources/yahoo.py   today's chain, any optionable ticker   (free)
+  sources/cboe.py    VXAPL etc. from FRED                   (free, 5 names, 2010+)
+  schema.py          the chain table ivlib consumes
+  snapshot.py        the daily job
+  compute.py         chains -> iv30 / skew / coverage, joined with realized vol
+  ui.py              the page
+data/chains/<TICKER>/<date>.parquet   ~15 KB each, committed
+```
+
+## Running the benchmarks
 
 ```bash
 pip install -e ".[dev,bench]"

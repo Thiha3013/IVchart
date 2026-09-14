@@ -1,0 +1,15 @@
+# One ticker per line. History for a ticker starts the day it is added.
+# Liquid, optionable names; the five with a Cboe vol index get free history back to 2011.
+AAPL    # Cboe VXAPL
+AMZN    # Cboe VXAZN
+GOOG    # Cboe VXGOG
+GS      # Cboe VXGS
+IBM     # Cboe VXIBM
+MSFT
+NVDA
+META
+TSLA
+AMD
+SPY
+QQQ
+GME
