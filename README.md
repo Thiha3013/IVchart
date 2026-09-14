@@ -101,14 +101,21 @@ original version produced, because a scalar loop could not afford the rest.
 
 ## The app: implied vs realized, any ticker, over time
 
+Two processes: a FastAPI server over the engine, and a React frontend.
+
 ```bash
 pip install -e ".[app]"
-streamlit run app/ui.py
+uvicorn app.api:app --reload --port 8000       # API   http://localhost:8000/docs
+cd web && npm install && npm run dev            # UI    http://localhost:5173
 ```
 
 Type a ticker. You get 30-day implied vol (solved by ivlib from the live chain)
 against 21-day realized vol (from price history), today's smile by expiry, and a
-funnel showing what fraction of the chain was usable.
+funnel showing what fraction of the chain was usable. **Track** adds a ticker to
+the watchlist so the daily snapshot starts building its history.
+
+The frontend is a static Vite build (`web/`), deployable as-is to Vercel or any
+static host with `VITE_API_BASE` pointing at the API.
 
 **How history works.** There is no free source of historical option chains, so
 the app builds its own: `app/snapshot.py` fetches the chain for every ticker in
@@ -141,7 +148,8 @@ app/
   schema.py          the chain table ivlib consumes
   snapshot.py        the daily job
   compute.py         chains -> iv30 / skew / coverage, joined with realized vol
-  ui.py              the page
+  api.py             FastAPI: /api/metrics, /api/smile, /api/watchlist, /api/snapshot
+web/                 React + Recharts frontend
 data/chains/<TICKER>/<date>.parquet   ~15 KB each, committed
 ```
 
