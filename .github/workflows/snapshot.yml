@@ -1,0 +1,62 @@
+# Daily option-chain snapshot.
+#
+# Runs twice on weekdays, 30 minutes before the close in each of EDT and EST
+# (GitHub cron is UTC and does not know about US daylight time). Whichever run
+# lands inside regular hours stores the chains; the other is skipped by the
+# market-state guard in app/snapshot.py, and a second in-hours run the same day
+# is a no-op because the day is already stored. The 30-minute buffer is for
+# scheduler delay, which can run to tens of minutes.
+#
+# Only data/chains/ is committed. Metrics are a local cache rebuilt from chains.
+
+name: snapshot
+
+on:
+  schedule:
+    - cron: "30 19 * * 1-5"   # 15:30 EDT
+    - cron: "30 20 * * 1-5"   # 15:30 EST
+  workflow_dispatch:           # run by hand from the Actions tab
+
+permissions:
+  contents: write
+
+concurrency:
+  group: snapshot
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            app
+            ivlib
+            data
+            pyproject.toml
+          sparse-checkout-cone-mode: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: install
+        run: pip install -e ".[app]"
+
+      - name: snapshot watchlist
+        run: python -m app.snapshot
+
+      - name: commit new chains
+        run: |
+          git config user.name  "snapshot-bot"
+          git config user.email "snapshot-bot@users.noreply.github.com"
+          git add data/chains
+          if git diff --cached --quiet; then
+            echo "nothing new"
+          else
+            git commit -m "snapshot $(date -u +%F)"
+            git push
+          fi
