@@ -30,6 +30,7 @@ from app import schema, store
 from app.sources import yahoo
 
 WATCHLIST = Path(__file__).resolve().parent / "watchlist.txt"
+WATCHLIST_MAX = 40   # mirrors app.remote.WATCHLIST_MAX; the endpoint is public
 
 
 def load_watchlist(path: Path = WATCHLIST) -> list[str]:
@@ -52,8 +53,11 @@ def add_to_watchlist(ticker: str, path: Path = WATCHLIST) -> tuple[bool, str]:
     ticker = ticker.upper().strip()
     if not ticker.isalnum() or len(ticker) > 6:
         return False, f"{ticker!r} is not a ticker symbol"
-    if ticker in load_watchlist(path):
+    current = load_watchlist(path)
+    if ticker in current:
         return False, f"{ticker} is already on the watchlist"
+    if len(current) >= WATCHLIST_MAX:
+        return False, f"watchlist is full ({WATCHLIST_MAX} tickers)"
     try:
         yahoo.fetch(ticker, max_expiries=1)
     except yahoo.ChainUnavailable as e:

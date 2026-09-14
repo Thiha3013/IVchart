@@ -114,8 +114,29 @@ against 21-day realized vol (from price history), today's smile by expiry, and a
 funnel showing what fraction of the chain was usable. **Track** adds a ticker to
 the watchlist so the daily snapshot starts building its history.
 
-The frontend is a static Vite build (`web/`), deployable as-is to Vercel or any
-static host with `VITE_API_BASE` pointing at the API.
+### Deploying
+
+Three pieces, three homes, all free:
+
+| piece | host | how it updates |
+|---|---|---|
+| `web/` frontend | **Vercel** | push to `main` |
+| `app/api.py` | **Render** (free web service, `render.yaml`) | push to `main` -- including the daily snapshot commit, so new data arrives by redeploy |
+| daily snapshot | **GitHub Actions** | cron, 30 min before the close |
+
+- **Vercel:** import the repo, set *Root Directory* to `web`, add env var
+  `VITE_API_BASE=https://<your-render-service>.onrender.com`. Done.
+- **Render:** *New > Blueprint*, pick the repo; `render.yaml` defines the service.
+  Then set `GITHUB_TOKEN` in the dashboard: a fine-grained personal access token
+  scoped to this one repo with *Contents: read and write*. That is what lets
+  **Track** commit a new ticker to `app/watchlist.txt` from the deployed site.
+- The free Render instance sleeps after 15 min idle and takes ~1 min to wake;
+  the first request after each deploy also pays a numba JIT. Peak memory is
+  ~345 MB of the 512 MB allowance.
+
+The 195 MB vendor CSV is in git LFS; deploys never touch it. The 9 MB Parquet
+produced by `bench/ingest.py` is committed instead, so both Render and CI get
+AAPL's 2021-23 history from a plain clone.
 
 **How history works.** There is no free source of historical option chains, so
 the app builds its own: `app/snapshot.py` fetches the chain for every ticker in

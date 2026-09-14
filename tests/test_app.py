@@ -240,3 +240,34 @@ def test_add_to_watchlist_rejects_unknown_and_garbage(tmp_path, monkeypatch):
     assert not snapshot.add_to_watchlist("ZZZZ", p)[0]
     assert not snapshot.add_to_watchlist("../etc", p)[0]
     assert not p.exists() or snapshot.load_watchlist(p) == []
+
+
+# ------------------------------------------------------------------ remote (GitHub-backed watchlist)
+
+def test_remote_append_is_idempotent_and_commits_once(monkeypatch):
+    from app import remote
+    import base64
+    monkeypatch.setenv("GITHUB_TOKEN", "x"); monkeypatch.setenv("GITHUB_REPO", "o/r")
+    calls = []
+    def fake_request(method, url, body=None):
+        calls.append((method, body))
+        if method == "GET":
+            return {"content": base64.b64encode(b"AAPL   # note\nMSFT\n").decode(), "sha": "abc"}
+        return {}
+    monkeypatch.setattr(remote, "_request", fake_request)
+
+    added, _ = remote.append_ticker("msft")
+    assert not added and [m for m, _ in calls] == ["GET"]        # no PUT for a duplicate
+
+    calls.clear()
+    added, _ = remote.append_ticker("nvda")
+    assert added and [m for m, _ in calls] == ["GET", "PUT"]
+    put = calls[1][1]
+    assert put["sha"] == "abc"
+    assert base64.b64decode(put["content"]).decode() == "AAPL   # note\nMSFT\nNVDA\n"
+
+
+def test_remote_not_configured_without_env(monkeypatch):
+    from app import remote
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    assert not remote.configured()

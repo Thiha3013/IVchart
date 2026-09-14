@@ -1,0 +1,32 @@
+# Render Blueprint for the API. Frontend goes to Vercel (see web/vercel.json).
+#
+# Free tier: 512 MB RAM, sleeps after 15 min idle, ~1 min cold start, 750 h/mo.
+# Measured peak RSS for this service is ~345 MB (AAPL metrics build), so it
+# fits, with the first request after each deploy paying a numba JIT (~10-20 s
+# on the shared CPU; cached on disk afterwards).
+#
+# Auto-deploy on push to main is Render's default, which is also how new
+# snapshots reach the API: the daily GitHub Action commits chains -> push ->
+# redeploy with the fresh data. No polling, no shared disk.
+
+services:
+  - type: web
+    name: ivchart-api
+    runtime: python
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: pip install -e ".[app]"
+    startCommand: uvicorn app.api:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: NUMBA_CACHE_DIR
+        value: /tmp/numba-cache
+      - key: GITHUB_REPO
+        value: Thiha3013/IVchart
+      - key: GITHUB_TOKEN
+        sync: false          # set in the Render dashboard; never in the repo
+      - key: WATCHLIST_MAX
+        value: "40"
