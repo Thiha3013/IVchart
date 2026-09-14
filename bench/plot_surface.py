@@ -43,6 +43,10 @@ def style(ax, grid_axis="both"):
 
 
 def main(out="bench/surface.png"):
+    import os
+    from bench.build_surface import OUTPUTS, main as build
+    if not all(os.path.exists(f) for f in OUTPUTS):
+        build()
     tab = pd.read_parquet("iv_table.parquet")
     ivhv = pd.read_parquet("iv_hv.parquet")
     sk = pd.read_parquet("skew.parquet")

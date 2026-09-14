@@ -46,7 +46,10 @@ The pipeline is four steps, one module each:
 ## The optimization ladder
 
 Five implementations of the same inversion, same 262,796 real quotes, all
-agreeing to within 1e-11:
+agreeing to within 1e-11. Measured on an 8-core Apple laptop; on a 20-thread
+12th-gen Intel machine the Numba rung reaches 32.1M/s (33,886x) while the
+single-thread NumPy rungs run about 3x slower -- the ladder's *shape* is
+hardware-dependent even though every rung's answers are not.
 
 | rung | M/s | vs L0 | source of the win |
 |---|---|---|---|

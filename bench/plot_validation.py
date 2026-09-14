@@ -34,7 +34,7 @@ GRID = "#e4e3df"
 SERIES_1 = "#2a78d6"   # categorical slot 1 -- fixed
 SERIES_2 = "#eb6834"   # categorical slot 2 -- buggy
 # Sequential ramp: one hue, light -> dark. Never a rainbow.
-SEQ = LinearSegmentedColormap.from_list("blues", ["#eaf1fb", "#9cc1ea", "#2a78d6", "#123a६b".replace("६", "6")])
+SEQ = LinearSegmentedColormap.from_list("blues", ["#eaf1fb", "#9cc1ea", "#2a78d6", "#123a6b"])
 
 
 def style(ax):
