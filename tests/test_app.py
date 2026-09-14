@@ -4,9 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from app import compute, realized, schema, snapshot, store
-from app.sources import cboe, yahoo
-from ivlib import bs
+from app import data as schema, data as store, pipeline as snapshot, pipeline as compute, pipeline as realized, sources as yahoo, sources as cboe
+from ivlib import pricing as bs
 
 
 # ------------------------------------------------------------------ fixtures
@@ -110,16 +109,16 @@ def test_merge_sides_pairs_call_and_put_by_strike():
 
 def test_cboe_parse_handles_fred_format_and_missing_values():
     csv = "observation_date,VXAPLCLS\n2024-01-02,25.5\n2024-01-03,.\n2024-01-04,27.0\n"
-    s = cboe.parse(csv)
+    s = cboe.parse_fred(csv)
     assert len(s) == 2                             # the '.' row is dropped
     assert s.iloc[0] == pytest.approx(0.255)       # percent -> decimal
     assert s.index[1] == pd.Timestamp("2024-01-04")
 
 
 def test_cboe_coverage_is_exactly_five():
-    assert cboe.available("AAPL") and cboe.available("gs")
-    assert not cboe.available("MSFT")
-    assert cboe.fetch("MSFT").empty                # no network call for unknown names
+    assert cboe.cboe_available("AAPL") and cboe.cboe_available("gs")
+    assert not cboe.cboe_available("MSFT")
+    assert cboe.cboe_index("MSFT").empty                # no network call for unknown names
 
 
 # ------------------------------------------------------------------ realized
@@ -128,7 +127,7 @@ def test_realized_trailing_and_forward_are_shifted_views_of_the_same_thing():
     rng = np.random.default_rng(0)
     close = pd.Series(100 * np.exp(np.cumsum(rng.normal(0, 0.02, 300))),
                       index=pd.bdate_range("2024-01-01", periods=300))
-    both = realized.both(close, window=21)
+    both = realized.realized_vol(close, window=21)
     tr, fw = both["rv21_trailing"], both["rv21_forward"]
     # The forward window ending at t+21 is the trailing window at t+21.
     i = 100
@@ -141,7 +140,7 @@ def test_realized_annualization():
     rng = np.random.default_rng(1)
     r = rng.normal(0, 0.01, 5000)
     close = pd.Series(100 * np.exp(np.cumsum(r)), index=pd.bdate_range("2010-01-01", periods=5000))
-    tr = realized.trailing(close, window=2000).dropna()
+    tr = realized.realized_vol(close, window=2000)["rv2000_trailing"].dropna()
     assert tr.mean() == pytest.approx(0.01 * np.sqrt(252), rel=0.03)
 
 
@@ -169,21 +168,21 @@ def test_store_concatenates_days_in_order(tmp_store):
 # ------------------------------------------------------------------ snapshot
 
 def test_snapshot_refuses_pre_market(tmp_store, monkeypatch):
-    monkeypatch.setattr(yahoo, "fetch", lambda t, **kw: synth_chain(state="PRE"))
+    monkeypatch.setattr(yahoo, "fetch_chain", lambda t, **kw: synth_chain(state="PRE"))
     status, detail = snapshot.snapshot_one("TEST")
     assert status == "skipped" and "PRE" in detail
     assert not store.chain_days("TEST")
 
 
 def test_snapshot_stores_live_chain_once(tmp_store, monkeypatch):
-    monkeypatch.setattr(yahoo, "fetch", lambda t, **kw: synth_chain(state="REGULAR"))
+    monkeypatch.setattr(yahoo, "fetch_chain", lambda t, **kw: synth_chain(state="REGULAR"))
     assert snapshot.snapshot_one("TEST")[0] == "stored"
     assert snapshot.snapshot_one("TEST")[0] == "skipped"    # same day, no-op
     assert store.chain_days("TEST") == ["2026-03-02"]
 
 
 def test_snapshot_force_overrides_guards(tmp_store, monkeypatch):
-    monkeypatch.setattr(yahoo, "fetch", lambda t, **kw: synth_chain(state="PRE"))
+    monkeypatch.setattr(yahoo, "fetch_chain", lambda t, **kw: synth_chain(state="PRE"))
     assert snapshot.snapshot_one("TEST", force=True)[0] == "stored"
 
 
@@ -192,8 +191,8 @@ def test_snapshot_one_bad_ticker_does_not_stop_the_rest(tmp_store, monkeypatch, 
         if t == "BAD":
             raise yahoo.ChainUnavailable("BAD: no listed options")
         return synth_chain(ticker=t)
-    monkeypatch.setattr(yahoo, "fetch", fake)
-    rc = snapshot.main(["GOOD", "BAD", "ALSO"])
+    monkeypatch.setattr(yahoo, "fetch_chain", fake)
+    rc = snapshot.main(["snapshot", "GOOD", "BAD", "ALSO"])
     assert rc == 1                                   # failure is reported...
     assert store.tickers() == ["ALSO", "GOOD"]       # ...but the others still stored
 
@@ -225,7 +224,7 @@ def test_implied_series_empty_input():
 def test_add_to_watchlist_validates_and_appends(tmp_path, monkeypatch):
     p = tmp_path / "w.txt"
     p.write_text("AAPL\n")
-    monkeypatch.setattr(yahoo, "fetch", lambda t, **kw: synth_chain(ticker=t))
+    monkeypatch.setattr(yahoo, "fetch_chain", lambda t, **kw: synth_chain(ticker=t))
     added, msg = snapshot.add_to_watchlist("nvda", p)
     assert added and snapshot.load_watchlist(p) == ["AAPL", "NVDA"]
     added, _ = snapshot.add_to_watchlist("NVDA", p)          # idempotent
@@ -236,7 +235,7 @@ def test_add_to_watchlist_rejects_unknown_and_garbage(tmp_path, monkeypatch):
     p = tmp_path / "w.txt"
     def fake(t, **kw):
         raise yahoo.ChainUnavailable(f"{t}: no listed options")
-    monkeypatch.setattr(yahoo, "fetch", fake)
+    monkeypatch.setattr(yahoo, "fetch_chain", fake)
     assert not snapshot.add_to_watchlist("ZZZZ", p)[0]
     assert not snapshot.add_to_watchlist("../etc", p)[0]
     assert not p.exists() or snapshot.load_watchlist(p) == []
@@ -245,7 +244,7 @@ def test_add_to_watchlist_rejects_unknown_and_garbage(tmp_path, monkeypatch):
 # ------------------------------------------------------------------ remote (GitHub-backed watchlist)
 
 def test_remote_append_is_idempotent_and_commits_once(monkeypatch):
-    from app import remote
+    from app import sources as remote
     import base64
     monkeypatch.setenv("GITHUB_TOKEN", "x"); monkeypatch.setenv("GITHUB_REPO", "o/r")
     calls = []
@@ -254,13 +253,13 @@ def test_remote_append_is_idempotent_and_commits_once(monkeypatch):
         if method == "GET":
             return {"content": base64.b64encode(b"AAPL   # note\nMSFT\n").decode(), "sha": "abc"}
         return {}
-    monkeypatch.setattr(remote, "_request", fake_request)
+    monkeypatch.setattr(remote, "_gh", fake_request)
 
-    added, _ = remote.append_ticker("msft")
+    added, _ = remote.github_append_ticker("msft")
     assert not added and [m for m, _ in calls] == ["GET"]        # no PUT for a duplicate
 
     calls.clear()
-    added, _ = remote.append_ticker("nvda")
+    added, _ = remote.github_append_ticker("nvda")
     assert added and [m for m, _ in calls] == ["GET", "PUT"]
     put = calls[1][1]
     assert put["sha"] == "abc"
@@ -268,6 +267,6 @@ def test_remote_append_is_idempotent_and_commits_once(monkeypatch):
 
 
 def test_remote_not_configured_without_env(monkeypatch):
-    from app import remote
+    from app import sources as remote
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    assert not remote.configured()
+    assert not remote.github_configured()

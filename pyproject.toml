@@ -1,17 +1,17 @@
 [project]
 name = "ivlib"
-version = "0.1.0"
+version = "0.2.0"
 description = "Vectorized implied volatility engine for equity options"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24", "pandas>=2.0", "scipy>=1.10"]
+dependencies = ["numpy>=1.24", "pandas>=2.0", "scipy>=1.10", "numba>=0.59"]
 
 [project.optional-dependencies]
-bench = ["matplotlib>=3.7", "pyarrow>=14.0", "numba>=0.59"]
-app = ["yfinance>=1.0", "fastapi>=0.110", "uvicorn[standard]>=0.27", "httpx", "pyarrow>=14.0", "numba>=0.59"]
+bench = ["matplotlib>=3.7", "pyarrow>=14.0"]
+app = ["yfinance>=1.0", "fastapi>=0.110", "uvicorn[standard]>=0.27", "httpx", "pyarrow>=14.0"]
 dev = ["pytest>=7.4"]
 
 [tool.setuptools]
-packages = ["ivlib", "app", "app.sources"]
+packages = ["ivlib", "app"]
 
 [build-system]
 requires = ["setuptools>=68"]
