@@ -140,10 +140,10 @@ def main(path="aapl_2021_2023.parquet"):
                    float(np.mean(np.abs(r[s] - 1) < 0.02) * 100))
             rows.append(row)
             hi_s = "inf" if hi == np.inf else f"{hi:.3f}"
-            print(f"{f'±{lo:.3f}-{hi_s}':>18}{row[2]:>10,}{row[3]:>9.4f}{row[4]:>7.1f}%")
+            print(f"{f'+/-{lo:.3f}-{hi_s}':>18}{row[2]:>10,}{row[3]:>9.4f}{row[4]:>7.1f}%")
 
     good = unc < 0.02
-    print(f"\nrestricted to quotes the market pins to ±2 vol points "
+    print(f"\nrestricted to quotes the market pins to +/-2 vol points "
           f"({good.sum():,}, {100*good.mean():.1f}%):")
     print(f"  median {np.median(r[good]):.4f}   "
           f"within 2% {100*np.mean(np.abs(r[good]-1)<0.02):.1f}%   "

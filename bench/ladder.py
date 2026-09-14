@@ -17,6 +17,7 @@ second) is the comparable figure across all rungs.
 from __future__ import annotations
 
 import math
+import os
 import time
 
 import numpy as np
@@ -92,7 +93,7 @@ RUNGS = [
     ("L1  scalar + math.erf", l1, True, "cheaper CDF"),
     ("L2  NumPy vectorized", l2, False, "memory layout"),
     ("L3  NumPy + Corrado-Miller seed", l3, False, "fewer iterations"),
-    ("L4  Numba fused + parallel", l4, False, "registers, 8 cores"),
+    ("L4  Numba fused + parallel", l4, False, f"registers, {os.cpu_count()} cpus"),
 ]
 
 
