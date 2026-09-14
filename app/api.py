@@ -19,7 +19,7 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from app import compute, schema, snapshot, store
+from app import compute, remote, schema, snapshot, store
 from app.sources import cboe, yahoo
 from ivlib import filter as qf, surface
 
@@ -218,12 +218,25 @@ def watchlist():
 
 @app.post("/api/watchlist/{ticker}")
 def track(ticker: str):
-    """Start tracking a ticker. Locally this appends to app/watchlist.txt; a
-    deployed API must write somewhere the daily job reads from (the repo)."""
-    added, detail = snapshot.add_to_watchlist(ticker)
-    if not added and "not a ticker" in detail:
-        raise HTTPException(400, detail)
-    return {"added": added, "detail": detail, "watchlist": snapshot.load_watchlist()}
+    """Start tracking a ticker.
+
+    Locally this appends to app/watchlist.txt. Deployed (GITHUB_TOKEN set) it
+    commits the line to the repo instead, because the daily snapshot job reads
+    the watchlist from there, not from this server's disk. See app/remote.py.
+    """
+    t = ticker.upper().strip()
+    if not t.isalnum() or len(t) > 6:
+        raise HTTPException(400, f"{t!r} is not a ticker symbol")
+    if remote.configured():
+        # Validate the symbol has options before committing anything.
+        try:
+            yahoo.fetch(t, max_expiries=1)
+        except yahoo.ChainUnavailable as e:
+            return {"added": False, "detail": str(e), "watchlist": snapshot.load_watchlist()}
+        added, detail = remote.append_ticker(t)
+    else:
+        added, detail = snapshot.add_to_watchlist(t)
+    return {"added": added, "detail": detail, "watchlist": snapshot.load_watchlist(), "via": "github" if remote.configured() else "local"}
 
 
 @app.get("/api/health")
