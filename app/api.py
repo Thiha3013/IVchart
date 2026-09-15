@@ -162,7 +162,10 @@ def track(ticker: str):
         added, detail = sources.github_append_ticker(t)
     else:
         added, detail = pipeline.add_to_watchlist(t)
-    return {"added": added, "detail": detail, "watchlist": pipeline.load_watchlist(),
+    wl = pipeline.load_watchlist()
+    if added and t not in wl:   # github path: local file lags the commit until redeploy
+        wl.append(t)
+    return {"added": added, "detail": detail, "watchlist": wl,
             "via": "github" if sources.github_configured() else "local"}
 
 

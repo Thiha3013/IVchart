@@ -1,0 +1,6 @@
+# Only web/ goes to Vercel; the API lives on Render.
+/*
+!/web
+web/node_modules
+web/dist
+web/.vite
