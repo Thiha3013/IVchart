@@ -3,3 +3,6 @@ dist
 .env.local
 tsconfig.tsbuildinfo
 .vite
+
+.vercel
+.env*
