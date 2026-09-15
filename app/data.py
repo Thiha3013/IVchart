@@ -4,7 +4,7 @@ Columns match the vendor CSV so any source drops into ivlib unchanged.
 
     data/chains/<TICKER>/<YYYY-MM-DD>.parquet   one compacted chain per day (committed)
     data/metrics/<TICKER>.parquet               derived series, a cache (ignored)
-    data/vendor/aapl_2021_2023.parquet          ingested vendor CSV (committed, 9 MB)
+    data/vendor/aapl_2021_2023.parquet          AAPL 2021-23 vendor chains (committed, 9 MB)
 """
 
 from __future__ import annotations
@@ -109,7 +109,7 @@ def tickers() -> list[str]:
 
 
 def vendor_history(ticker: str) -> pd.DataFrame:
-    """The 2021-23 AAPL CSV, ingested. Same schema, older dates."""
+    """AAPL 2021-23 vendor chains. Same schema, older dates."""
     if ticker.upper() != "AAPL" or not VENDOR.exists():
         return pd.DataFrame()
     return _widen(pd.read_parquet(VENDOR))

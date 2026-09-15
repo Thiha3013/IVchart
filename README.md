@@ -30,8 +30,8 @@ app/        the product
   pipeline  snapshot + compute jobs, realized vol
   api       FastAPI over the above
 web/        React + Recharts frontend (Vite)
-bench/      ingest, validate, ladder, surface (+ figures/)
-data/       chains/ (daily snapshots, committed) · vendor/ (AAPL 2021-23)
+bench/      validate, ladder, surface (+ figures/)
+data/       chains/ (daily snapshots, committed) · vendor/ (AAPL 2021-23, 548k quotes, Parquet)
 ```
 
 ## The engine
@@ -95,7 +95,7 @@ watchlist.
 own: `app/pipeline.py snapshot` stores each watched ticker's chain daily
 (~15 KB/ticker/day → `data/chains/`), run by a GitHub Actions cron 30 min before
 the close. Implied history for a ticker starts the day it's added. Realized vol is
-full-length from day one. AAPL has 2021–23 from the vendor CSV; AAPL/AMZN/GOOG/GS/IBM
+full-length from day one. AAPL has 2021–23 from a vendor dataset; AAPL/AMZN/GOOG/GS/IBM
 have Cboe's vol indices back to 2010 (a variance-strip rate, ~10% above ATM vol on
 AAPL, correlation 0.98 — a second independent check on the engine).
 
@@ -112,13 +112,11 @@ column (a placeholder — 0.00001 on every ITM contract).
 | snapshot cron | GitHub Actions | schedule |
 
 Render sleeps after 15 min idle (~1 min wake); first request after a deploy pays
-a numba JIT. Peak RSS ~345 MB of 512. The 195 MB CSV is git LFS; deploys use the
-committed 9 MB Parquet instead.
+a numba JIT. Peak RSS ~345 MB of 512.
 
 ## Benchmarks
 
 ```bash
-python -m bench.ingest                 # CSV → Parquet
 python -m bench.validate --plot        # vs vendor marks
 python -m bench.ladder --plot          # five implementations
 python -m bench.surface                # the surface figure
