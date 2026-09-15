@@ -2,6 +2,7 @@
 
     python -m app.pipeline snapshot [TICKERS...] [--force]   store today's chain per watched ticker
     python -m app.pipeline compute  [TICKERS...]             chains -> iv30/skew/coverage + realized vol
+    python -m app.pipeline vendor                            precompute the implied series over the vendor chains
 
 Snapshot refuses chains captured outside regular hours (bid=ask=0 then) and stores
 one per ticker per day. History for a ticker starts the day it's first snapshotted.
@@ -137,10 +138,10 @@ def implied_series(chains: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_metrics(ticker: str, price_period: str = "5y") -> pd.DataFrame:
-    """Implied + realized + Cboe, joined on date."""
+    """Implied + realized + Cboe, joined on date. Vendor history comes precomputed (see `vendor`)."""
     ticker = ticker.upper()
-    chains = pd.concat([data.vendor_history(ticker), data.read_chains(ticker)], ignore_index=True)
-    parts = [implied_series(chains)]
+    implied = pd.concat([data.vendor_implied(ticker), implied_series(data.read_chains(ticker))])
+    parts = [implied[~implied.index.duplicated(keep="last")] if len(implied) else implied]
     close = sources.price_history(ticker, period=price_period)
     parts += [realized_vol(close), close.rename("close")]
     if sources.cboe_available(ticker):
@@ -172,14 +173,27 @@ def compute(tickers: list[str] | None = None) -> int:
     return 0
 
 
+def vendor() -> int:
+    """One-off: run the engine over the 548k-row vendor dataset and store the daily series."""
+    if not data.VENDOR.exists():
+        print("no vendor dataset"); return 2
+    t0 = time.perf_counter()
+    s = implied_series(data.vendor_history("AAPL"))
+    s.to_parquet(data.VENDOR_IMPLIED, compression="zstd")
+    print(f"{len(s)} days -> {data.VENDOR_IMPLIED.relative_to(data.ROOT.parent)}  [{time.perf_counter()-t0:.1f}s]")
+    return 0
+
+
 # ---------------------------------------------------------------- cli
 
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv or argv[0] not in ("snapshot", "compute"):
+    if not argv or argv[0] not in ("snapshot", "compute", "vendor"):
         print(__doc__)
         return 2
     cmd, rest = argv[0], argv[1:]
+    if cmd == "vendor":
+        return vendor()
     force = "--force" in rest
     tickers = [a for a in rest if not a.startswith("--")]
     return snapshot(tickers, force) if cmd == "snapshot" else compute(tickers)

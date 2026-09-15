@@ -5,6 +5,8 @@ Columns match the vendor CSV so any source drops into ivlib unchanged.
     data/chains/<TICKER>/<YYYY-MM-DD>.parquet   one compacted chain per day (committed)
     data/metrics/<TICKER>.parquet               derived series, a cache (ignored)
     data/vendor/aapl_2021_2023.parquet          AAPL 2021-23 vendor chains (committed, 9 MB)
+    data/vendor/aapl_2021_2023_implied.parquet  the engine's daily series over those chains,
+                                                precomputed so the API never loads 548k rows
 """
 
 from __future__ import annotations
@@ -15,7 +17,9 @@ import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent / "data"
-CHAINS, METRICS, VENDOR = ROOT / "chains", ROOT / "metrics", ROOT / "vendor" / "aapl_2021_2023.parquet"
+CHAINS, METRICS = ROOT / "chains", ROOT / "metrics"
+VENDOR = ROOT / "vendor" / "aapl_2021_2023.parquet"
+VENDOR_IMPLIED = ROOT / "vendor" / "aapl_2021_2023_implied.parquet"
 
 CORE = {
     "QUOTE_DATE": "string", "EXPIRE_DATE": "string", "DTE": "float64",
@@ -109,10 +113,27 @@ def tickers() -> list[str]:
 
 
 def vendor_history(ticker: str) -> pd.DataFrame:
-    """AAPL 2021-23 vendor chains. Same schema, older dates."""
+    """AAPL 2021-23 vendor chains. Same schema, older dates. 548k rows -- avoid in the API."""
     if ticker.upper() != "AAPL" or not VENDOR.exists():
         return pd.DataFrame()
     return _widen(pd.read_parquet(VENDOR))
+
+
+def vendor_last_day(ticker: str) -> pd.DataFrame:
+    """Only the vendor dataset's final day, read with a parquet filter (a few hundred rows)."""
+    if ticker.upper() != "AAPL" or not VENDOR.exists():
+        return pd.DataFrame()
+    import pyarrow.parquet as pq
+    last = pq.read_table(VENDOR, columns=["QUOTE_DATE"]).column(0).to_pylist()
+    day = max(last)
+    return _widen(pd.read_parquet(VENDOR, filters=[("QUOTE_DATE", "==", day)]))
+
+
+def vendor_implied(ticker: str) -> pd.DataFrame:
+    """Precomputed implied series over the vendor chains (see pipeline.vendor)."""
+    if ticker.upper() != "AAPL" or not VENDOR_IMPLIED.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(VENDOR_IMPLIED)
 
 
 # ---------------------------------------------------------------- metrics cache
