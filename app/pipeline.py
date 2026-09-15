@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,7 @@ from app import data, sources
 from ivlib import surface
 
 WATCHLIST = Path(__file__).resolve().parent / "watchlist.txt"
+EARLIEST_ET_HOUR = 14   # store only late-session chains, so snapshot time is consistent day to day
 WATCHLIST_MAX = sources.WATCHLIST_MAX
 TRADING_DAYS = 252
 RV_WINDOW = 21   # trading days ~ 30 calendar, matching the 30d implied series
@@ -73,6 +75,8 @@ def snapshot_one(ticker: str, force: bool = False) -> tuple[str, str]:
     day, state = str(chain["QUOTE_DATE"].iloc[0]), str(chain["MARKET_STATE"].iloc[0])
     if not force and data.has_chain(ticker, day):
         return "skipped", f"{ticker}: already have {day}"
+    if not force and datetime.now(sources.ET).hour < EARLIEST_ET_HOUR:
+        return "skipped", f"{ticker}: before {EARLIEST_ET_HOUR}:00 ET -- not storing yet"
     if not force and not sources.is_live(chain):
         two_sided = float(((chain["C_BID"] > 0) & (chain["C_ASK"] > 0)).mean())
         return "skipped", f"{ticker}: market state {state}, {two_sided:.0%} two-sided quotes -- not storing"
