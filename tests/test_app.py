@@ -40,7 +40,16 @@ def tmp_store(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "ROOT", tmp_path)
     monkeypatch.setattr(store, "CHAINS", tmp_path / "chains")
     monkeypatch.setattr(store, "METRICS", tmp_path / "metrics")
+    monkeypatch.setattr(snapshot, "EARLIEST_ET_HOUR", 0)   # tests run at any hour
     return tmp_path
+
+
+def test_snapshot_skips_before_earliest_hour(tmp_store, monkeypatch):
+    monkeypatch.setattr(snapshot, "EARLIEST_ET_HOUR", 25)   # never reached
+    monkeypatch.setattr(yahoo, "fetch_chain", lambda t, **kw: synth_chain(state="REGULAR"))
+    status, detail = snapshot.snapshot_one("TEST")
+    assert status == "skipped" and "ET" in detail
+    assert snapshot.snapshot_one("TEST", force=True)[0] == "stored"
 
 
 # ------------------------------------------------------------------ schema
