@@ -32,9 +32,32 @@ def _warm():
         pass   # warm-up is best-effort; requests build on demand anyway
 
 
+_clock_lock = threading.Lock()
+_last_publish: dict = {"date": None, "result": None}
+
+
+def _clock():
+    """Every 5 min while up: in the window and today not yet stored -> snapshot + publish."""
+    while True:
+        try:
+            if pipeline.in_snapshot_window():
+                today = pipeline.datetime.now(sources.ET).date().isoformat()
+                wl = pipeline.load_watchlist()
+                pending = wl and not all(data.has_chain(t, today) for t in wl)
+                if pending and _clock_lock.acquire(blocking=False):
+                    try:
+                        _last_publish.update(date=today, result=pipeline.snapshot_and_publish(wl))
+                    finally:
+                        _clock_lock.release()
+        except Exception as e:   # never let the clock die
+            _last_publish.update(result={"error": f"{type(e).__name__}: {e}"})
+        time.sleep(300)
+
+
 @contextlib.asynccontextmanager
 async def _lifespan(_app):
-    threading.Thread(target=_warm, daemon=True).start()   # don't block the health check
+    threading.Thread(target=_warm, daemon=True).start()    # don't block the health check
+    threading.Thread(target=_clock, daemon=True).start()
     yield
 
 
@@ -258,4 +281,5 @@ def take_snapshot(ticker: str):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "tickers_stored": len(data.tickers())}
+    return {"ok": True, "tickers_stored": len(data.tickers()),
+            "in_window": pipeline.in_snapshot_window(), "last_publish": _last_publish}

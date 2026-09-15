@@ -159,6 +159,22 @@ def _contents_url() -> str:
     return f"https://api.github.com/repos/{os.environ['GITHUB_REPO']}/contents/{WATCHLIST_PATH}"
 
 
+def github_commit_files(files: dict[str, bytes], message: str) -> str:
+    """Commit several files in ONE commit via the Git Data API. Returns the new commit sha."""
+    repo, branch = os.environ["GITHUB_REPO"], os.environ.get("GITHUB_BRANCH", "main")
+    base = f"https://api.github.com/repos/{repo}"
+    head = _gh("GET", f"{base}/git/ref/heads/{branch}")["object"]["sha"]
+    base_tree = _gh("GET", f"{base}/git/commits/{head}")["tree"]["sha"]
+    tree = [{"path": path, "mode": "100644", "type": "blob",
+             "sha": _gh("POST", f"{base}/git/blobs",
+                        {"content": base64.b64encode(blob).decode(), "encoding": "base64"})["sha"]}
+            for path, blob in files.items()]
+    tree_sha = _gh("POST", f"{base}/git/trees", {"base_tree": base_tree, "tree": tree})["sha"]
+    commit = _gh("POST", f"{base}/git/commits", {"message": message, "tree": tree_sha, "parents": [head]})["sha"]
+    _gh("PATCH", f"{base}/git/refs/heads/{branch}", {"sha": commit, "force": False})
+    return commit
+
+
 def github_append_ticker(ticker: str) -> tuple[bool, str]:
     """Append to the repo watchlist in one commit. Idempotent; stale sha -> reported, not retried."""
     ticker = ticker.upper().strip()
