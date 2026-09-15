@@ -23,6 +23,7 @@ from ivlib import surface
 
 WATCHLIST = Path(__file__).resolve().parent / "watchlist.txt"
 EARLIEST_ET_HOUR = 14   # store only late-session chains, so snapshot time is consistent day to day
+CLOSE_ET_HOUR = 16
 WATCHLIST_MAX = sources.WATCHLIST_MAX
 TRADING_DAYS = 252
 RV_WINDOW = 21   # trading days ~ 30 calendar, matching the 30d implied series
@@ -85,6 +86,32 @@ def snapshot_one(ticker: str, force: bool = False) -> tuple[str, str]:
     compact = data.compact(chain)
     p = data.write_chain(compact)
     return "stored", f"{ticker}: {day} {len(compact)} rows -> {p.relative_to(data.ROOT.parent)}"
+
+
+def in_snapshot_window(now: datetime | None = None) -> bool:
+    """Weekday, 14:00-16:00 ET. snapshot_one's market-state check still covers holidays."""
+    now = now or datetime.now(sources.ET)
+    return now.weekday() < 5 and EARLIEST_ET_HOUR <= now.hour < CLOSE_ET_HOUR
+
+
+def snapshot_and_publish(tickers: list[str] | None = None) -> dict:
+    """Snapshot the watchlist, then commit new chain files to the repo in one commit.
+
+    The API's own daily job: GitHub's cron fired hours late or not at all, so the
+    always-on server keeps the clock and publishes with the token it already has.
+    """
+    tickers = tickers or load_watchlist()
+    today = datetime.now(sources.ET).date().isoformat()
+    new_files, counts = {}, {"stored": 0, "skipped": 0, "failed": 0}
+    for tk in tickers:
+        status, _ = snapshot_one(tk)
+        counts[status] += 1
+        if status == "stored":   # repo path is a contract: data/chains/<T>/<day>.parquet
+            new_files[f"data/chains/{tk.upper()}/{today}.parquet"] = data.chain_path(tk, today).read_bytes()
+    committed = None
+    if new_files and sources.github_configured():
+        committed = sources.github_commit_files(new_files, f"snapshot {today} ({len(new_files)} tickers)")
+    return {**counts, "committed": committed}
 
 
 def snapshot(tickers: list[str] | None = None, force: bool = False) -> int:

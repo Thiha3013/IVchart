@@ -336,3 +336,46 @@ def test_metrics_endpoint_for_a_ticker_with_no_implied_history(tmp_store, monkey
     assert j["summary"]["days_implied"] == 0 and j["summary"]["iv30"] is None
     assert j["series"][0]["date"].startswith("2025-01")
     assert all(p.get("rv21_trailing") is None for p in j["series"][:20])   # window not filled yet
+
+
+# ------------------------------------------------------------------ self-scheduling snapshot
+
+def test_in_snapshot_window():
+    from datetime import datetime
+    from app.sources import ET
+    assert snapshot.in_snapshot_window(datetime(2026, 9, 15, 14, 30, tzinfo=ET))       # Tue 14:30
+    assert not snapshot.in_snapshot_window(datetime(2026, 9, 15, 13, 59, tzinfo=ET))   # too early
+    assert not snapshot.in_snapshot_window(datetime(2026, 9, 15, 16, 0, tzinfo=ET))    # closed
+    assert not snapshot.in_snapshot_window(datetime(2026, 9, 19, 14, 30, tzinfo=ET))   # Saturday
+
+
+def test_snapshot_and_publish_commits_new_files_once(tmp_store, monkeypatch):
+    from datetime import datetime
+    today = datetime.now(yahoo.ET).date().isoformat()
+    monkeypatch.setattr(yahoo, "fetch_chain", lambda t, **kw: synth_chain(ticker=t, day=today))
+    monkeypatch.setattr(yahoo, "github_configured", lambda: True)
+    commits = []
+    monkeypatch.setattr(yahoo, "github_commit_files", lambda files, msg: commits.append((sorted(files), msg)) or "sha123")
+    out = snapshot.snapshot_and_publish(["AAA", "BBB"])
+    assert out["stored"] == 2 and out["committed"] == "sha123"
+    assert len(commits) == 1 and len(commits[0][0]) == 2 and commits[0][0][0].startswith("data/chains/AAA/")
+    out = snapshot.snapshot_and_publish(["AAA", "BBB"])            # same day again: nothing new, no commit
+    assert out["stored"] == 0 and out["committed"] is None and len(commits) == 1
+
+
+def test_github_commit_files_builds_one_commit(monkeypatch):
+    from app import sources
+    monkeypatch.setenv("GITHUB_TOKEN", "x"); monkeypatch.setenv("GITHUB_REPO", "o/r")
+    calls = []
+    def fake(method, url, body=None):
+        calls.append(method)
+        if url.endswith("/ref/heads/main"): return {"object": {"sha": "head"}}
+        if "/git/commits/head" in url: return {"tree": {"sha": "basetree"}}
+        if url.endswith("/git/blobs"): return {"sha": "blob"}
+        if url.endswith("/git/trees"): return {"sha": "tree"}
+        if url.endswith("/git/commits"): return {"sha": "newcommit"}
+        return {}
+    monkeypatch.setattr(sources, "_gh", fake)
+    sha = sources.github_commit_files({"data/chains/A/d.parquet": b"x", "data/chains/B/d.parquet": b"y"}, "snapshot")
+    assert sha == "newcommit"
+    assert calls.count("POST") == 4 and calls[-1] == "PATCH"     # 2 blobs + tree + commit, then the ref
