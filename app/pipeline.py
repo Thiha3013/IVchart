@@ -141,14 +141,15 @@ def build_metrics(ticker: str, price_period: str = "5y") -> pd.DataFrame:
     """Implied + realized + Cboe, joined on date. Vendor history comes precomputed (see `vendor`)."""
     ticker = ticker.upper()
     implied = pd.concat([data.vendor_implied(ticker), implied_series(data.read_chains(ticker))])
-    parts = [implied[~implied.index.duplicated(keep="last")] if len(implied) else implied]
+    parts = [implied[~implied.index.duplicated(keep="last")]] if len(implied) else []   # an empty frame poisons the index dtype on pandas 3
     close = sources.price_history(ticker, period=price_period)
     parts += [realized_vol(close), close.rename("close")]
     if sources.cboe_available(ticker):
         parts.append(sources.cboe_index(ticker))
-    m = pd.concat(parts, axis=1).sort_index()
+    m = pd.concat(parts, axis=1)
+    m.index = pd.to_datetime(m.index)
     m.index.name = "date"
-    return m.dropna(how="all")
+    return m.sort_index().dropna(how="all")
 
 
 def compute(tickers: list[str] | None = None) -> int:
@@ -178,9 +179,13 @@ def vendor() -> int:
     if not data.VENDOR.exists():
         print("no vendor dataset"); return 2
     t0 = time.perf_counter()
-    s = implied_series(data.vendor_history("AAPL"))
+    chains = data.vendor_history("AAPL")
+    s = implied_series(chains)
     s.to_parquet(data.VENDOR_IMPLIED, compression="zstd")
-    print(f"{len(s)} days -> {data.VENDOR_IMPLIED.relative_to(data.ROOT.parent)}  [{time.perf_counter()-t0:.1f}s]")
+    last = chains[chains["QUOTE_DATE"] == chains["QUOTE_DATE"].max()]
+    last.to_parquet(data.VENDOR_LASTDAY, compression="zstd", index=False)
+    print(f"{len(s)} days -> {data.VENDOR_IMPLIED.relative_to(data.ROOT.parent)}; "
+          f"{len(last)} rows -> {data.VENDOR_LASTDAY.relative_to(data.ROOT.parent)}  [{time.perf_counter()-t0:.1f}s]")
     return 0
 
 
