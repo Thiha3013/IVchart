@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import math
+import threading
 import time
 
 import numpy as np
@@ -14,9 +16,26 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import data, pipeline, sources
-from ivlib import market as mk, surface
+from ivlib import market as mk, solver, surface
 
-app = FastAPI(title="IVchart", version="0.2.0")
+
+def _warm():
+    """JIT numba and pre-build AAPL so a cold start costs the boot, not the first request."""
+    try:
+        solver.implied_vol_fast(np.array([3.0]), 100.0, np.array([100.0]), 0.1, 1.0, True)
+        if data.read_metrics("AAPL").empty:
+            data.write_metrics("AAPL", pipeline.build_metrics("AAPL"))
+    except Exception:
+        pass   # warm-up is best-effort; requests build on demand anyway
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app):
+    threading.Thread(target=_warm, daemon=True).start()   # don't block the health check
+    yield
+
+
+app = FastAPI(title="IVchart", version="0.2.0", lifespan=_lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST"], allow_headers=["*"])
 
 _LIVE_TTL = 300

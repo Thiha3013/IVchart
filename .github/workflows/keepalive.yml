@@ -1,0 +1,18 @@
+# Keep the free Render instance awake during hours someone might look.
+# It sleeps after 15 min idle and takes ~1 min to wake; this pings every 14 min,
+# 08:00-22:00 ET. Nights it sleeps and the first visitor pays the wake.
+# Render free = 750 instance-hours/month, enough for one service continuously.
+
+name: keepalive
+
+on:
+  schedule:
+    - cron: "*/14 12-23,0-2 * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - run: curl -sS -m 90 -o /dev/null -w "%{http_code} %{time_total}s\n" https://ivchart-api.onrender.com/api/health
