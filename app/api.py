@@ -5,15 +5,19 @@
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import math
+import os
+import re
 import threading
 import time
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app import data, pipeline, sources
 from ivlib import market as mk, solver, surface
@@ -23,8 +27,7 @@ def _warm():
     """JIT numba and pre-build AAPL so a cold start costs the boot, not the first request."""
     try:
         solver.implied_vol_fast(np.array([3.0]), 100.0, np.array([100.0]), 0.1, 1.0, True)
-        if data.read_metrics("AAPL").empty:
-            data.write_metrics("AAPL", pipeline.build_metrics("AAPL"))
+        _metrics("AAPL")
     except Exception:
         pass   # warm-up is best-effort; requests build on demand anyway
 
@@ -36,10 +39,51 @@ async def _lifespan(_app):
 
 
 app = FastAPI(title="IVchart", version="0.2.0", lifespan=_lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST"], allow_headers=["*"])
+
+# Browser access only from the deployed frontend, its Vercel previews, and local dev.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://ivchart.vercel.app", "http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origin_regex=r"https://ivchart-[a-z0-9-]+-thiha3013\.vercel\.app",
+    allow_methods=["GET", "POST"], allow_headers=["*"],
+)
+
+# Per-IP rate limit. Every endpoint can reach Yahoo, and one abusive client
+# getting Render's IP throttled would take the site down for everyone.
+_RATE = int(os.environ.get("RATE_LIMIT_PER_MIN", "60"))
+_hits: dict[str, collections.deque] = collections.defaultdict(collections.deque)
+_hits_lock = threading.Lock()
+
+
+@app.middleware("http")
+async def _rate_limit(request: Request, call_next):
+    ip = (request.headers.get("x-forwarded-for") or request.client.host or "?").split(",")[0].strip()
+    now = time.time()
+    with _hits_lock:
+        q = _hits[ip]
+        while q and now - q[0] > 60:
+            q.popleft()
+        if len(q) >= _RATE:
+            return JSONResponse({"detail": "rate limit: 60 requests/min"}, status_code=429)
+        q.append(now)
+        if len(_hits) > 10_000:   # bound memory under a flood of distinct IPs
+            _hits.clear()
+    return await call_next(request)
+
+
+_TICKER = re.compile(r"^[A-Z0-9.^-]{1,8}$")
+
+
+def _ticker(raw: str) -> str:
+    """Uppercase, and only characters a listed symbol can contain. Rejects everything else."""
+    t = raw.upper().strip()
+    if not _TICKER.match(t):
+        raise HTTPException(400, "not a ticker symbol")
+    return t
 
 _LIVE_TTL = 300
 _live_cache: dict[str, tuple[float, pd.DataFrame]] = {}
+_build_lock = threading.Lock()   # one metrics build at a time: 512 MB instance
 
 
 def _clean(v):
@@ -64,16 +108,27 @@ def _live_chain(ticker):
 
 
 def _fallback_chain(ticker):
-    """Last stored chain; for AAPL, the vendor CSV's last day."""
+    """Last stored chain; for AAPL, the vendor dataset's last day."""
     stored = data.latest_chain(ticker)
     if not stored.empty:
         return stored, "stored"
-    vendor = data.vendor_history(ticker)
+    vendor = data.vendor_last_day(ticker)
     if vendor.empty:
         return pd.DataFrame(), None
-    df = data.validate(vendor[vendor["QUOTE_DATE"] == vendor["QUOTE_DATE"].max()])
+    df = data.validate(vendor)
     df["TICKER"], df["SOURCE"], df["MARKET_STATE"] = ticker, "vendor", "REGULAR"
     return df, "vendor"
+
+
+def _metrics(ticker, rebuild=False):
+    m = pd.DataFrame() if rebuild else data.read_metrics(ticker)
+    if m.empty:
+        with _build_lock:
+            m = data.read_metrics(ticker)          # another thread may have just built it
+            if m.empty:
+                m = pipeline.build_metrics(ticker)
+                data.write_metrics(ticker, m)
+    return m
 
 
 @app.get("/api/tickers")
@@ -86,14 +141,11 @@ def tickers():
 
 @app.get("/api/metrics/{ticker}")
 def metrics(ticker: str, rebuild: bool = False):
-    ticker = ticker.upper()
-    m = pd.DataFrame() if rebuild else data.read_metrics(ticker)
-    if m.empty:
-        try:
-            m = pipeline.build_metrics(ticker)
-        except sources.ChainUnavailable as e:
-            raise HTTPException(404, str(e))
-        data.write_metrics(ticker, m)
+    ticker = _ticker(ticker)
+    try:
+        m = _metrics(ticker, rebuild)
+    except sources.ChainUnavailable as e:
+        raise HTTPException(404, str(e))
 
     def last(col):
         s = m[col].dropna() if col in m else pd.Series(dtype=float)
@@ -121,7 +173,7 @@ def metrics(ticker: str, rebuild: bool = False):
 @app.get("/api/smile/{ticker}")
 def smile(ticker: str, expiries: int = Query(4, ge=1, le=8)):
     """Today's smile if the market is open, else the last stored chain."""
-    ticker = ticker.upper()
+    ticker = _ticker(ticker)
     try:
         chain, source = _live_chain(ticker), "live"
         if not sources.is_live(chain):
@@ -170,9 +222,9 @@ def watchlist():
 @app.post("/api/watchlist/{ticker}")
 def track(ticker: str):
     """Local: append to app/watchlist.txt. Deployed (GITHUB_TOKEN set): commit to the repo."""
-    t = ticker.upper().strip()
+    t = _ticker(ticker)
     if not t.isalnum() or len(t) > 6:
-        raise HTTPException(400, f"{t!r} is not a ticker symbol")
+        raise HTTPException(400, "not a ticker symbol")
     if sources.github_configured():
         try:
             sources.fetch_chain(t, max_expiries=1)
@@ -189,10 +241,11 @@ def track(ticker: str):
 
 
 @app.post("/api/snapshot/{ticker}")
-def take_snapshot(ticker: str, force: bool = False):
-    status, detail = pipeline.snapshot_one(ticker.upper(), force=force)
+def take_snapshot(ticker: str):
+    ticker = _ticker(ticker)
+    status, detail = pipeline.snapshot_one(ticker, force=False)   # force is local-only; never over HTTP
     if status == "stored":
-        _live_cache.pop(ticker.upper(), None)
+        _live_cache.pop(ticker, None)
     return {"status": status, "detail": detail}
 
 

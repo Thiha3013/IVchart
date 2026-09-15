@@ -279,3 +279,45 @@ def test_remote_not_configured_without_env(monkeypatch):
     from app import sources as remote
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     assert not remote.github_configured()
+
+
+# ------------------------------------------------------------------ api hardening
+
+def _client():
+    from fastapi.testclient import TestClient
+    from app.api import app
+    return TestClient(app)
+
+
+def test_api_rejects_malformed_tickers():
+    c = _client()
+    for bad in ("../etc", "AAPL;DROP", "a" * 20, "<b>", "%00"):
+        r = c.get(f"/api/metrics/{bad}")
+        assert r.status_code in (400, 404), (bad, r.status_code)
+        assert "<" not in r.text
+
+
+def test_api_rate_limits_per_ip(monkeypatch):
+    from app import api
+    monkeypatch.setattr(api, "_RATE", 5)
+    api._hits.clear()
+    c = _client()
+    codes = [c.get("/api/health").status_code for _ in range(7)]
+    assert codes[:5] == [200] * 5 and codes[5:] == [429, 429]
+    api._hits.clear()
+
+
+def test_api_snapshot_cannot_be_forced_over_http(monkeypatch):
+    from app import api, pipeline
+    seen = {}
+    monkeypatch.setattr(pipeline, "snapshot_one", lambda t, force=False: seen.update(force=force) or ("skipped", "x"))
+    _client().post("/api/snapshot/AAPL?force=true")
+    assert seen["force"] is False
+
+
+def test_cors_allows_only_known_origins():
+    c = _client()
+    ok = c.options("/api/health", headers={"Origin": "https://ivchart.vercel.app", "Access-Control-Request-Method": "GET"})
+    assert ok.headers.get("access-control-allow-origin") == "https://ivchart.vercel.app"
+    bad = c.options("/api/health", headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "GET"})
+    assert "access-control-allow-origin" not in bad.headers
