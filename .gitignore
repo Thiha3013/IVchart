@@ -23,6 +23,6 @@ dist/
 # ...except stored chain snapshots, which are the dataset itself
 !data/chains/**/*.parquet
 # ...and the vendor dataset (9 MB), so deploys and CI get AAPL's 2021-23 history
-!data/vendor/aapl_2021_2023.parquet
+!data/vendor/*.parquet
 .vercel
 .env*

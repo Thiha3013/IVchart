@@ -17,13 +17,15 @@ services:
     region: oregon
     branch: main
     buildCommand: pip install -e ".[app]"
-    startCommand: uvicorn app.api:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn app.api:app --host 0.0.0.0 --port $PORT --limit-concurrency 8
     healthCheckPath: /api/health
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.7"
       - key: NUMBA_CACHE_DIR
         value: /tmp/numba-cache
+      - key: NUMBA_NUM_THREADS       # the box is 0.1 CPU; numba would otherwise size its pool to the host's cores
+        value: "2"
       - key: GITHUB_REPO
         value: Thiha3013/IVchart
       - key: GITHUB_TOKEN

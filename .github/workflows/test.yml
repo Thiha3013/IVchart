@@ -1,0 +1,16 @@
+# Tests on a fresh install of the latest dependencies -- the environment Render
+# builds -- so a pandas/numpy release can't take the API down unnoticed.
+name: test
+on:
+  push: { branches: [main], paths-ignore: ["data/chains/**", "web/**"] }
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[app,dev]"
+      - run: python -m pytest -q

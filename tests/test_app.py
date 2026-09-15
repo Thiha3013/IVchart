@@ -321,3 +321,18 @@ def test_cors_allows_only_known_origins():
     assert ok.headers.get("access-control-allow-origin") == "https://ivchart.vercel.app"
     bad = c.options("/api/health", headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "GET"})
     assert "access-control-allow-origin" not in bad.headers
+
+
+def test_metrics_endpoint_for_a_ticker_with_no_implied_history(tmp_store, monkeypatch):
+    """Every ticker but AAPL on day one. On pandas 3 an empty implied frame turned the
+    date index into a plain Index and the endpoint 500'd."""
+    idx = pd.bdate_range("2025-01-01", periods=120)
+    close = pd.Series(np.linspace(100, 120, 120), index=idx, name="close")
+    monkeypatch.setattr(yahoo, "price_history", lambda t, period="5y": close)
+    monkeypatch.setattr(yahoo, "cboe_available", lambda t: False)
+    r = _client().get("/api/metrics/MSFT")
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["summary"]["days_implied"] == 0 and j["summary"]["iv30"] is None
+    assert j["series"][0]["date"].startswith("2025-01")
+    assert all(p.get("rv21_trailing") is None for p in j["series"][:20])   # window not filled yet

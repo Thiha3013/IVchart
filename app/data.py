@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent / "data"
 CHAINS, METRICS = ROOT / "chains", ROOT / "metrics"
 VENDOR = ROOT / "vendor" / "aapl_2021_2023.parquet"
 VENDOR_IMPLIED = ROOT / "vendor" / "aapl_2021_2023_implied.parquet"
+VENDOR_LASTDAY = ROOT / "vendor" / "aapl_2021_2023_lastday.parquet"
 
 CORE = {
     "QUOTE_DATE": "string", "EXPIRE_DATE": "string", "DTE": "float64",
@@ -120,13 +121,10 @@ def vendor_history(ticker: str) -> pd.DataFrame:
 
 
 def vendor_last_day(ticker: str) -> pd.DataFrame:
-    """Only the vendor dataset's final day, read with a parquet filter (a few hundred rows)."""
-    if ticker.upper() != "AAPL" or not VENDOR.exists():
+    """The vendor dataset's final day (a few hundred rows), precomputed by `pipeline vendor`."""
+    if ticker.upper() != "AAPL" or not VENDOR_LASTDAY.exists():
         return pd.DataFrame()
-    import pyarrow.parquet as pq
-    last = pq.read_table(VENDOR, columns=["QUOTE_DATE"]).column(0).to_pylist()
-    day = max(last)
-    return _widen(pd.read_parquet(VENDOR, filters=[("QUOTE_DATE", "==", day)]))
+    return _widen(pd.read_parquet(VENDOR_LASTDAY))
 
 
 def vendor_implied(ticker: str) -> pd.DataFrame:

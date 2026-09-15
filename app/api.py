@@ -97,7 +97,7 @@ def _records(df, cols):
     """Rows as JSON-safe dicts. Vectorized: iterrows() cost ~2 s per 4k rows on Render's shared CPU."""
     cols = [c for c in cols if c in df.columns]
     out = df[cols].astype(object).where(df[cols].notna(), None)
-    out.insert(0, "date", df.index.strftime("%Y-%m-%d"))
+    out.insert(0, "date", pd.to_datetime(df.index).strftime("%Y-%m-%d"))
     return out.to_dict("records")
 
 
@@ -106,6 +106,10 @@ def _live_chain(ticker):
     if hit and now - hit[0] < _LIVE_TTL:
         return hit[1]
     chain = sources.fetch_chain(ticker)
+    for k in [k for k, (t, _) in _live_cache.items() if now - t > _LIVE_TTL]:   # evict expired
+        _live_cache.pop(k, None)
+    if len(_live_cache) >= 32:
+        _live_cache.pop(next(iter(_live_cache)))
     _live_cache[ticker] = (now, chain)
     return chain
 
