@@ -1,1 +1,1 @@
-"""Benchmarks and figures: ingest, validate, ladder, surface."""
+"""Benchmarks and figures: validate, ladder, surface."""
