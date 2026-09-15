@@ -1,13 +1,12 @@
-# Keep the free Render instance awake during hours someone might look.
-# It sleeps after 15 min idle and takes ~1 min to wake; this pings every 14 min,
-# 08:00-22:00 ET. Nights it sleeps and the first visitor pays the wake.
-# Render free = 750 instance-hours/month, enough for one service continuously.
+# Keep the free Render instance awake. It sleeps after 15 min idle and takes
+# ~15 s to wake; this pings every 14 min around the clock. Render free =
+# 750 instance-hours/month; a 31-day month is 744, so one service fits.
 
 name: keepalive
 
 on:
   schedule:
-    - cron: "*/14 12-23,0-2 * * *"
+    - cron: "*/14 * * * *"
   workflow_dispatch:
 
 jobs:
