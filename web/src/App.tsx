@@ -72,6 +72,20 @@ export default function App() {
         </form>
       </header>
 
+      {known.length > 0 && (
+        <div className="chips" aria-label="tracked tickers">
+          <span className="muted">tracked, snapshotted daily at 14:00 ET —</span>
+          {known.map((k) => (
+            <button key={k.ticker} type="button" className={`chip ${k.ticker === ticker ? "on" : ""}`}
+                    onClick={() => { setInput(k.ticker); setTicker(k.ticker); }}
+                    title={k.days_stored ? `${k.days_stored} days of snapshots` : "no snapshots yet"}>
+              {k.ticker}
+              <span className="n">{historyNote(k)}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
       {flash && <div className={`notice ${flash.ok ? "ok" : ""}`}>{flash.text}</div>}
       {error && <div className="notice err">{error}</div>}
       {loading && <p className="muted">loading {ticker}…</p>}
@@ -115,6 +129,13 @@ export default function App() {
       )}
     </>
   );
+}
+
+function historyNote(k: TickerInfo): string {
+  if (k.days_stored) return `${k.days_stored}d`;
+  if (k.vendor_history) return "2021–23";
+  if (k.cboe_index) return "Cboe";
+  return "";
 }
 
 function Tile({ label, value, note }: { label: string; value: string; note?: string }) {
