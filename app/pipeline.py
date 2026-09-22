@@ -106,6 +106,7 @@ def snapshot_and_publish(tickers: list[str] | None = None) -> dict:
     for tk in tickers:
         status, _ = snapshot_one(tk)
         counts[status] += 1
+        time.sleep(1.0)   # spread ~300 Yahoo requests out; a burst gets rate-limited
         if status == "stored":   # repo path is a contract: data/chains/<T>/<day>.parquet
             new_files[f"data/chains/{tk.upper()}/{today}.parquet"] = data.chain_path(tk, today).read_bytes()
     committed = None

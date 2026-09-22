@@ -36,12 +36,23 @@ def _ticker(symbol):
     return yf.Ticker(symbol)
 
 
+def _retry(fn, tries=3, base=1.5):
+    """Call fn, backing off 1.5 s, 3 s on failure. Yahoo 429s bursts of requests."""
+    for i in range(tries):
+        try:
+            return fn()
+        except Exception:
+            if i == tries - 1:
+                raise
+            time.sleep(base * 2 ** i)
+
+
 def fetch_chain(symbol: str, max_expiries: int | None = None) -> pd.DataFrame:
     """Every listed expiry for `symbol`, as one schema-shaped table."""
     symbol = symbol.upper().strip()
     tk = _ticker(symbol)
     try:
-        expiries = list(tk.options)
+        expiries = list(_retry(lambda: tk.options))
     except Exception as e:
         raise ChainUnavailable(f"{symbol}: could not list expiries ({e})") from e
     if not expiries:
@@ -49,17 +60,22 @@ def fetch_chain(symbol: str, max_expiries: int | None = None) -> pd.DataFrame:
     if max_expiries:
         expiries = expiries[:max_expiries]
 
-    frames, spot, state, captured = [], None, None, int(time.time())
+    frames, spot, state, captured, failed = [], None, None, int(time.time()), 0
     for exp in expiries:
         try:
-            oc = tk.option_chain(exp)
+            oc = _retry(lambda: tk.option_chain(exp))
         except Exception:
+            failed += 1
             continue
         if spot is None:
             u = getattr(oc, "underlying", {}) or {}
             spot, state = u.get("regularMarketPrice"), u.get("marketState", "UNKNOWN")
         frames.append(_merge_sides(oc.calls, oc.puts, exp))
 
+    # A chain missing expiries is not today's chain. Yahoo rate-limits bursts; better
+    # to fail the ticker and let the clock retry than to store a partial record.
+    if failed > max(1, len(expiries) // 10):
+        raise ChainUnavailable(f"{symbol}: {failed} of {len(expiries)} expiries failed after retries")
     if not frames or spot is None or not np.isfinite(spot):
         raise ChainUnavailable(f"{symbol}: chain returned but no usable underlying price")
 

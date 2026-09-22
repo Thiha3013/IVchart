@@ -61,7 +61,7 @@ async def _lifespan(_app):
     yield
 
 
-app = FastAPI(title="IVchart", version="0.2.0", lifespan=_lifespan)
+app = FastAPI(title="IVchart", version="0.2.1", lifespan=_lifespan)
 
 # Browser access only from the deployed frontend, its Vercel previews, and local dev.
 app.add_middleware(

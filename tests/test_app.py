@@ -351,6 +351,7 @@ def test_in_snapshot_window():
 
 def test_snapshot_and_publish_commits_new_files_once(tmp_store, monkeypatch):
     from datetime import datetime
+    monkeypatch.setattr(snapshot.time, "sleep", lambda s: None)   # inter-ticker pacing
     today = datetime.now(yahoo.ET).date().isoformat()
     monkeypatch.setattr(yahoo, "fetch_chain", lambda t, **kw: synth_chain(ticker=t, day=today))
     monkeypatch.setattr(yahoo, "github_configured", lambda: True)
@@ -379,3 +380,41 @@ def test_github_commit_files_builds_one_commit(monkeypatch):
     sha = sources.github_commit_files({"data/chains/A/d.parquet": b"x", "data/chains/B/d.parquet": b"y"}, "snapshot")
     assert sha == "newcommit"
     assert calls.count("POST") == 4 and calls[-1] == "PATCH"     # 2 blobs + tree + commit, then the ref
+
+
+# ------------------------------------------------------------------ fetch retries
+
+class _FakeChain:
+    def __init__(self):
+        self.calls = pd.DataFrame({"strike": [100.0], "bid": [5.0], "ask": [5.2], "lastPrice": [5.1],
+                                   "volume": [1], "openInterest": [1]})
+        self.puts = self.calls.copy()
+        self.underlying = {"regularMarketPrice": 100.0, "marketState": "REGULAR"}
+
+
+class _FakeTicker:
+    def __init__(self, fail_first=0, always_fail=()):
+        self.options = ("2026-10-16", "2026-11-20", "2026-12-18")
+        self.fail_first, self.always_fail, self.calls_made = fail_first, set(always_fail), 0
+
+    def option_chain(self, exp):
+        self.calls_made += 1
+        if exp in self.always_fail or self.calls_made <= self.fail_first:
+            raise RuntimeError("429 Too Many Requests")
+        return _FakeChain()
+
+
+def test_fetch_chain_retries_transient_failures(monkeypatch):
+    monkeypatch.setattr(yahoo.time, "sleep", lambda s: None)
+    fake = _FakeTicker(fail_first=2)                    # first two attempts 429, then fine
+    monkeypatch.setattr(yahoo, "_ticker", lambda s: fake)
+    chain = yahoo.fetch_chain("TEST")
+    assert chain["EXPIRE_DATE"].nunique() == 3
+
+
+def test_fetch_chain_refuses_partial_chains(monkeypatch):
+    monkeypatch.setattr(yahoo.time, "sleep", lambda s: None)
+    fake = _FakeTicker(always_fail=("2026-11-20", "2026-12-18"))
+    monkeypatch.setattr(yahoo, "_ticker", lambda s: fake)
+    with pytest.raises(yahoo.ChainUnavailable, match="expiries failed"):
+        yahoo.fetch_chain("TEST")
