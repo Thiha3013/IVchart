@@ -1,6 +1,6 @@
-# Keep the free Render instance awake. It sleeps after 15 min idle and takes
-# ~15 s to wake; this pings every 14 min around the clock. Render free =
-# 750 instance-hours/month; a 31-day month is 744, so one service fits.
+# Backup pinger. cron-job.org (every 5 min) keeps Render awake; GitHub runs this
+# schedule every few hours at best, but it re-wakes the API if that pinger dies.
+# No --fail: an HTTP error here would only email a failed run.
 
 name: keepalive
 

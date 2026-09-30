@@ -92,11 +92,13 @@ funnel of what fraction of the chain was usable. **Track** adds a ticker to the
 watchlist.
 
 **History.** No free source of historical chains exists, so the app builds its
-own. Every weekday at 14:00 ET the API snapshots each watched ticker's chain
-(~15 KB/ticker/day) and commits them to `data/chains/` in one commit via the
-GitHub API; Render redeploys with the new data. The API keeps this clock itself
-because GitHub's scheduled workflows proved unreliable (fired hours late or not
-at all). Implied history for a ticker starts the day it's added. Realized vol is
+own. Every trading day (NYSE calendar) from 14:00 ET the API snapshots each
+watched ticker's chain (~15 KB/ticker/day) and commits it, with that day's row of
+`data/implied.parquet`, in one commit via the GitHub API; Render redeploys with
+the new data. Nothing is written locally until GitHub has it: a failed commit
+keeps the chains in memory and retries, so the disk always mirrors the repo.
+The API keeps this clock itself because GitHub's scheduled workflows proved
+unreliable (fired hours late or not at all). Implied history for a ticker starts the day it's added. Realized vol is
 full-length from day one. AAPL has 2021–23 from a vendor dataset; AAPL/AMZN/GOOG/GS/IBM
 have Cboe's vol indices back to 2010 (a variance-strip rate, ~10% above ATM vol on
 AAPL, correlation 0.98 — a second independent check on the engine).
@@ -112,11 +114,16 @@ column (a placeholder — 0.00001 on every ITM contract).
 | `web/` | Vercel — root dir `web`, env `VITE_API_BASE` | push |
 | `app/api.py` | Render free — `render.yaml`; set `GITHUB_TOKEN` (fine-grained, Contents r/w) | push, incl. its own daily snapshot commits |
 | keep-awake | cron-job.org → `/api/health` every 5 min | — |
+| monitor | cron-job.org → `/api/health?strict=1` weekdays 16:30 ET, email on failure | — |
 
 Render's free tier sleeps after 15 min idle, and a sleeping API would miss the
 snapshot window, so an external pinger keeps it up (750 free hours/month covers
 one service). Peak RSS ~225 MB of 512: the 548k-row vendor history is
-precomputed, so the API never loads it. `/api/health` reports the last publish.
+precomputed, so the API never loads it. `/api/health` reports the last snapshot,
+the GitHub token's expiry and the installed versions; `?strict=1` is 503 while
+anything needs a human (a missed trading day, a rejected or expiring token, a
+dead clock). Render and CI install the pinned set in `app/constraints.txt`;
+yfinance floats so a fix for Yahoo-side breakage arrives with any redeploy.
 
 ## Benchmarks
 

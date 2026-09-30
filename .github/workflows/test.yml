@@ -1,8 +1,8 @@
-# Tests on a fresh install of the latest dependencies -- the environment Render
-# builds -- so a pandas/numpy release can't take the API down unnoticed.
+# Tests on the pinned stack Render installs (app/constraints.txt). Skips the
+# API's own commits: snapshots and Track.
 name: test
 on:
-  push: { branches: [main], paths-ignore: ["data/chains/**", "web/**"] }
+  push: { branches: [main], paths-ignore: ["data/chains/**", "data/implied.parquet", "app/watchlist.txt", "web/**"] }
   pull_request:
 jobs:
   test:
@@ -12,5 +12,5 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with: { python-version: "3.12" }
-      - run: pip install -e ".[app,dev]"
+      - run: pip install -c app/constraints.txt -e ".[app,dev]"
       - run: python -m pytest -q

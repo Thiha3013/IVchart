@@ -40,7 +40,9 @@ def tmp_store(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "ROOT", tmp_path)
     monkeypatch.setattr(store, "CHAINS", tmp_path / "chains")
     monkeypatch.setattr(store, "METRICS", tmp_path / "metrics")
+    monkeypatch.setattr(store, "IMPLIED", tmp_path / "implied.parquet")
     monkeypatch.setattr(snapshot, "EARLIEST_ET_HOUR", 0)   # tests run at any hour
+    monkeypatch.setattr(snapshot, "unpublished", {})
     return tmp_path
 
 
@@ -285,8 +287,9 @@ def test_remote_not_configured_without_env(monkeypatch):
 
 def _client():
     from fastapi.testclient import TestClient
-    from app.api import app
-    return TestClient(app)
+    from app import api
+    api._hits.clear(); api._tracked.clear()   # limits are per process; tests share one
+    return TestClient(api.app)
 
 
 def test_api_rejects_malformed_tickers():
@@ -300,19 +303,63 @@ def test_api_rejects_malformed_tickers():
 def test_api_rate_limits_per_ip(monkeypatch):
     from app import api
     monkeypatch.setattr(api, "_RATE", 5)
-    api._hits.clear()
     c = _client()
-    codes = [c.get("/api/health").status_code for _ in range(7)]
+    codes = [c.get("/api/watchlist").status_code for _ in range(7)]
     assert codes[:5] == [200] * 5 and codes[5:] == [429, 429]
+    assert c.get("/api/health").status_code == 200          # Render's health check is never throttled
     api._hits.clear()
 
 
-def test_api_snapshot_cannot_be_forced_over_http(monkeypatch):
-    from app import api, pipeline
-    seen = {}
-    monkeypatch.setattr(pipeline, "snapshot_one", lambda t, force=False: seen.update(force=force) or ("skipped", "x"))
-    _client().post("/api/snapshot/AAPL?force=true")
-    assert seen["force"] is False
+def test_api_has_no_snapshot_endpoint():
+    """Snapshots are the clock's job; an HTTP trigger could store a day without committing it."""
+    assert _client().post("/api/snapshot/AAPL").status_code in (404, 405)
+
+
+def test_track_is_capped_per_hour_site_wide(monkeypatch):
+    """Each add is a commit and a Render redeploy."""
+    from app import api
+    monkeypatch.setattr(yahoo, "github_configured", lambda: False)
+    monkeypatch.setattr(snapshot, "add_to_watchlist", lambda t: (True, f"{t} added"))
+    c = _client()
+    codes = [c.post(f"/api/watchlist/T{i}").status_code for i in range(api._TRACK_PER_HOUR + 1)]
+    assert codes == [200] * api._TRACK_PER_HOUR + [429]
+
+
+def test_smile_falls_back_to_stored_chain_when_yahoo_fails(tmp_store, monkeypatch):
+    from app import api
+    def down(t, **kw):
+        raise ConnectionError("Yahoo down")
+    monkeypatch.setattr(yahoo, "fetch_chain", down)
+    api._live_cache.clear()
+    j = _client().get("/api/smile/TEST").json()
+    assert j["available"] is False and "unavailable" in j["reason"]
+    store.write_chain(schema.compact(synth_chain(day="2026-03-02")))
+    j = _client().get("/api/smile/TEST").json()
+    assert j["available"] and j["source"] == "stored" and j["date"] == "2026-03-02"
+
+
+def test_metrics_serves_stale_cache_when_rebuild_fails(tmp_store, monkeypatch):
+    idx = pd.bdate_range("2025-01-01", periods=60, name="date")
+    store.write_metrics("MSFT", pd.DataFrame({"close": np.linspace(100, 110, 60)}, index=idx))
+    store.expire_metrics("MSFT")                                   # as after a new snapshot
+    def down(t):
+        raise ConnectionError("Yahoo down")
+    monkeypatch.setattr(snapshot, "build_metrics", down)
+    r = _client().get("/api/metrics/MSFT")
+    assert r.status_code == 200 and len(r.json()["series"]) == 60
+    store.metrics_path("MSFT").unlink()
+    assert _client().get("/api/metrics/MSFT").status_code == 503   # nothing cached: retryable, not a 500
+
+
+def test_build_metrics_survives_fred_outage(tmp_store, monkeypatch):
+    idx = pd.bdate_range("2025-01-01", periods=60)
+    monkeypatch.setattr(yahoo, "price_history", lambda t, period="5y": pd.Series(np.linspace(100, 110, 60), index=idx))
+    monkeypatch.setattr(yahoo, "cboe_available", lambda t: True)
+    def down(t, timeout=30):
+        raise OSError("FRED down")
+    monkeypatch.setattr(yahoo, "cboe_index", down)
+    m = compute.build_metrics("GS")
+    assert "close" in m and "cboe_iv30" not in m
 
 
 def test_cors_allows_only_known_origins():
@@ -347,6 +394,21 @@ def test_in_snapshot_window():
     assert not snapshot.in_snapshot_window(datetime(2026, 9, 15, 13, 59, tzinfo=ET))   # too early
     assert not snapshot.in_snapshot_window(datetime(2026, 9, 15, 16, 0, tzinfo=ET))    # closed
     assert not snapshot.in_snapshot_window(datetime(2026, 9, 19, 14, 30, tzinfo=ET))   # Saturday
+    assert not snapshot.in_snapshot_window(datetime(2026, 12, 25, 14, 30, tzinfo=ET))  # Christmas
+
+
+def test_trading_calendar_and_missed_sessions():
+    from datetime import date, datetime
+    from app.sources import ET
+    assert not snapshot.trading_day(date(2026, 11, 26))   # Thanksgiving
+    assert not snapshot.trading_day(date(2026, 11, 27))   # 13:00 close, before our window
+    assert not snapshot.trading_day(date(2027, 6, 18))    # Juneteenth on a Saturday -> Friday
+    assert snapshot.trading_day(date(2027, 12, 31))       # New Year's on a Saturday: not observed
+    miss = snapshot.missed_sessions
+    assert miss("2026-11-25", datetime(2026, 11, 27, 18, 0, tzinfo=ET)) == 0    # holiday + early close: no alarm
+    assert miss("2026-11-25", datetime(2026, 11, 30, 16, 14, tzinfo=ET)) == 0   # Monday's window not closed yet
+    assert miss("2026-11-25", datetime(2026, 11, 30, 16, 15, tzinfo=ET)) == 1
+    assert miss(None) == 0
 
 
 def test_snapshot_and_publish_commits_new_files_once(tmp_store, monkeypatch):
@@ -356,12 +418,69 @@ def test_snapshot_and_publish_commits_new_files_once(tmp_store, monkeypatch):
     monkeypatch.setattr(yahoo, "fetch_chain", lambda t, **kw: synth_chain(ticker=t, day=today))
     monkeypatch.setattr(yahoo, "github_configured", lambda: True)
     commits = []
-    monkeypatch.setattr(yahoo, "github_commit_files", lambda files, msg: commits.append((sorted(files), msg)) or "sha123")
+
+    def commit(files, msg):
+        assert not store.tickers()                                  # nothing local until the commit lands
+        commits.append((sorted(files), msg))
+        return "sha123"
+
+    monkeypatch.setattr(yahoo, "github_commit_files", commit)
     out = snapshot.snapshot_and_publish(["AAA", "BBB"])
     assert out["stored"] == 2 and out["committed"] == "sha123"
-    assert len(commits) == 1 and len(commits[0][0]) == 2 and commits[0][0][0].startswith("data/chains/AAA/")
-    out = snapshot.snapshot_and_publish(["AAA", "BBB"])            # same day again: nothing new, no commit
+    assert commits[0][0] == [f"data/chains/AAA/{today}.parquet", f"data/chains/BBB/{today}.parquet", "data/implied.parquet"]
+    assert store.chain_days("BBB") == [today] and set(store.read_implied_all()["ticker"]) == {"AAA", "BBB"}
+    monkeypatch.setattr(yahoo, "fetch_chain", lambda t, **kw: pytest.fail("refetched a stored ticker"))
+    out = snapshot.snapshot_and_publish(["AAA", "BBB"])            # same day again: no Yahoo call, no commit
     assert out["stored"] == 0 and out["committed"] is None and len(commits) == 1
+
+
+def test_failed_commit_stores_nothing_and_retries_without_refetching(tmp_store, monkeypatch):
+    """A dead token must not look like a stored day, nor cost a round of Yahoo calls every 5 minutes."""
+    import urllib.error
+    from datetime import datetime
+    monkeypatch.setattr(snapshot.time, "sleep", lambda s: None)
+    today = datetime.now(yahoo.ET).date().isoformat()
+    fetched = []
+    monkeypatch.setattr(yahoo, "fetch_chain", lambda t, **kw: fetched.append(t) or synth_chain(ticker=t, day=today))
+    monkeypatch.setattr(yahoo, "github_configured", lambda: True)
+
+    def rejected(files, msg):
+        raise urllib.error.HTTPError("u", 401, "Bad credentials", {}, None)
+
+    monkeypatch.setattr(yahoo, "github_commit_files", rejected)
+    for _ in range(2):
+        with pytest.raises(urllib.error.HTTPError):
+            snapshot.snapshot_and_publish(["AAA", "BBB"])
+    assert fetched == ["AAA", "BBB"]                               # the retry was the commit alone
+    assert not store.tickers() and not store.IMPLIED.exists() and snapshot.pending(["AAA"])
+    monkeypatch.setattr(yahoo, "github_commit_files", lambda files, msg: "sha")
+    out = snapshot.snapshot_and_publish(["AAA", "BBB"])
+    assert out["committed"] == "sha" and fetched == ["AAA", "BBB"] and store.tickers() == ["AAA", "BBB"]
+    assert not snapshot.unpublished
+
+
+def test_closed_market_ends_the_pass_at_the_first_ticker(tmp_store, monkeypatch):
+    from datetime import datetime
+    monkeypatch.setattr(snapshot.time, "sleep", lambda s: None)
+    today = datetime.now(yahoo.ET).date().isoformat()
+    fetched = []
+    monkeypatch.setattr(yahoo, "fetch_chain", lambda t, **kw: fetched.append(t) or
+                        synth_chain(ticker=t, day=today, state="CLOSED", two_sided=False))
+    out = snapshot.snapshot_and_publish(["AAA", "BBB", "CCC"])
+    assert fetched == ["AAA"] and out["market"] == "CLOSED" and out["committed"] is None
+
+
+def test_implied_history_reads_the_file_and_solves_only_gaps(tmp_store, monkeypatch):
+    for d in ("2026-03-02", "2026-03-03"):
+        store.write_chain(schema.compact(synth_chain(day=d)))
+    snapshot.backfill_implied()
+    store.write_chain(schema.compact(synth_chain(day="2026-03-04")))   # e.g. a CLI snapshot: not in the file
+    solved, real = [], snapshot.implied_series
+    monkeypatch.setattr(snapshot, "implied_series", lambda c: solved.append(c["QUOTE_DATE"].nunique()) or real(c))
+    h = snapshot.implied_history("TEST")
+    assert list(h.index.strftime("%Y-%m-%d")) == ["2026-03-02", "2026-03-03", "2026-03-04"] and solved == [1]
+    healed = snapshot._with_implied_rows({})                           # next publish writes the gap back
+    assert len(healed) == 3
 
 
 def test_github_commit_files_builds_one_commit(monkeypatch):
@@ -380,6 +499,56 @@ def test_github_commit_files_builds_one_commit(monkeypatch):
     sha = sources.github_commit_files({"data/chains/A/d.parquet": b"x", "data/chains/B/d.parquet": b"y"}, "snapshot")
     assert sha == "newcommit"
     assert calls.count("POST") == 4 and calls[-1] == "PATCH"     # 2 blobs + tree + commit, then the ref
+
+
+def test_github_commit_files_skips_noop_and_retries_a_moved_branch(monkeypatch):
+    import urllib.error
+    from app import sources
+    monkeypatch.setenv("GITHUB_TOKEN", "x"); monkeypatch.setenv("GITHUB_REPO", "o/r")
+    calls, state = [], {"tree": "basetree", "patch_fails": 0}
+
+    def fake(method, url, body=None):
+        calls.append(method)
+        if url.endswith("/ref/heads/main"): return {"object": {"sha": "head"}}
+        if "/git/commits/head" in url: return {"tree": {"sha": "basetree"}}
+        if url.endswith("/git/blobs"): return {"sha": "blob"}
+        if url.endswith("/git/trees"): return {"sha": state["tree"]}
+        if url.endswith("/git/commits"): return {"sha": "newcommit"}
+        if method == "PATCH" and state["patch_fails"]:
+            state["patch_fails"] -= 1
+            raise urllib.error.HTTPError(url, 422, "not a fast forward", {}, None)
+        return {}
+
+    monkeypatch.setattr(sources, "_gh", fake)
+    assert sources.github_commit_files({"a": b"x"}, "m") is None and "PATCH" not in calls   # same tree: no commit
+    state.update(tree="tree", patch_fails=1)
+    calls.clear()
+    assert sources.github_commit_files({"a": b"x"}, "m") == "newcommit" and calls.count("PATCH") == 2
+
+
+def test_github_status_reads_expiry_and_rejection(monkeypatch):
+    import urllib.error
+    from app import sources
+    monkeypatch.setenv("GITHUB_TOKEN", "x"); monkeypatch.setenv("GITHUB_REPO", "o/r")
+    monkeypatch.setattr(sources, "_status", {"ok": None, "expires": None, "error": "", "checked": 0.0})
+    exp = {"github-authentication-token-expiration": "2026-12-01 00:00:00 UTC"}
+    monkeypatch.setattr(sources, "_gh", lambda m, u, body=None, with_headers=False: ({}, exp))
+    s = sources.github_status()
+    assert s["ok"] is True and s["expires"] == "2026-12-01"
+
+    def rejected(*a, **k):
+        raise urllib.error.HTTPError("u", 401, "Bad credentials", {}, None)
+
+    monkeypatch.setattr(sources, "_gh", rejected)
+    assert sources.github_status()["ok"] is True                  # cached
+    assert sources.github_status(max_age=0)["ok"] is False
+
+    def offline(*a, **k):
+        raise OSError("network down")
+
+    monkeypatch.setattr(sources, "_gh", offline)
+    s = sources.github_status(max_age=0)
+    assert s["ok"] is False and "OSError" in s["error"]           # unknown: keeps the last verdict
 
 
 def test_snapshot_and_publish_times_out_a_hung_ticker(tmp_store, monkeypatch):
@@ -410,6 +579,30 @@ def test_health_reports_last_snapshot_and_clock_log(tmp_store):
     j = _client().get("/api/health").json()
     assert j["last_snapshot"] == "2026-03-04" and j["tickers_stored"] == 1
     assert any(e["event"] == "test event" for e in j["clock_log"])
+
+
+def test_health_strict_is_503_only_with_problems(tmp_store, monkeypatch):
+    monkeypatch.delenv("RENDER", raising=False)
+    store.write_chain(schema.compact(synth_chain(day="2026-03-02")))    # long ago: sessions missed since
+    c = _client()
+    assert c.get("/api/health").status_code == 200                     # Render's check never fails on this
+    r = c.get("/api/health?strict=1")
+    assert r.status_code == 503 and "without a snapshot" in r.json()["problems"][0]
+    monkeypatch.setattr(snapshot, "missed_sessions", lambda last, now=None: 0)
+    assert c.get("/api/health?strict=1").status_code == 200
+
+
+def test_health_flags_github_token_problems(tmp_store, monkeypatch):
+    from datetime import date, timedelta
+    from app import sources
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setattr(snapshot, "missed_sessions", lambda last, now=None: 0)
+    monkeypatch.setattr(sources, "github_configured", lambda: True)
+    soon = (date.today() + timedelta(days=5)).isoformat()
+    monkeypatch.setattr(sources, "github_status", lambda max_age=0: {"ok": True, "expires": soon, "error": None})
+    assert "expires" in _client().get("/api/health?strict=1").json()["problems"][0]
+    monkeypatch.setattr(sources, "github_status", lambda max_age=0: {"ok": False, "expires": None, "error": "GitHub HTTP 401"})
+    assert _client().get("/api/health?strict=1").json()["problems"] == ["GitHub HTTP 401"]
 
 
 # ------------------------------------------------------------------ fetch retries

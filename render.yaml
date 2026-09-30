@@ -1,13 +1,12 @@
 # Render Blueprint for the API. Frontend goes to Vercel (see web/vercel.json).
 #
-# Free tier: 512 MB RAM, sleeps after 15 min idle, ~1 min cold start, 750 h/mo.
-# Measured peak RSS for this service is ~345 MB (AAPL metrics build), so it
-# fits, with the first request after each deploy paying a numba JIT (~10-20 s
-# on the shared CPU; cached on disk afterwards).
+# Free tier: 512 MB RAM, sleeps after 15 min idle, ~1 min cold start, 750 h/mo
+# (one always-on service uses 744 in a 31-day month: keep it the only free
+# service in this workspace). Peak RSS ~225 MB since the vendor series is precomputed.
 #
-# Auto-deploy on push to main is Render's default, which is also how new
-# snapshots reach the API: the daily GitHub Action commits chains -> push ->
-# redeploy with the fresh data. No polling, no shared disk.
+# The API snapshots its own watchlist (14:00-16:00 ET) and commits the chains;
+# the push redeploys, so the instance's disk always mirrors the repo.
+# Installs are pinned to app/constraints.txt, the set CI tests.
 
 services:
   - type: web
@@ -16,8 +15,8 @@ services:
     plan: free
     region: oregon
     branch: main
-    buildCommand: pip install -e ".[app]"
-    startCommand: uvicorn app.api:app --host 0.0.0.0 --port $PORT --limit-concurrency 8
+    buildCommand: pip install -c app/constraints.txt -e ".[app]"
+    startCommand: uvicorn app.api:app --host 0.0.0.0 --port $PORT --limit-concurrency 16
     healthCheckPath: /api/health
     envVars:
       - key: PYTHON_VERSION

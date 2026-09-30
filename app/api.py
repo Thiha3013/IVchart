@@ -9,10 +9,15 @@ import collections
 import contextlib
 import math
 import os
+import platform
 import re
 import threading
 import time
+from datetime import date
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
+import numba
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -21,6 +26,19 @@ from fastapi.responses import JSONResponse
 
 from app import data, pipeline, sources
 from ivlib import market as mk, solver, surface
+
+
+# ---------------------------------------------------------------- background threads
+
+_started = time.time()
+_clock_log: collections.deque = collections.deque(maxlen=50)   # in-memory; /api/health shows it
+_threads: dict[str, threading.Thread] = {}
+_beat = {"clock": time.time()}   # last clock loop; a stuck pass stops it moving
+
+
+def _log(event, **kw):
+    now = pipeline.datetime.now(sources.ET).strftime("%Y-%m-%d %H:%M:%S ET")
+    _clock_log.append({"t": now, "event": event, **kw})
 
 
 def _warm():
@@ -32,33 +50,18 @@ def _warm():
         pass   # warm-up is best-effort; requests build on demand anyway
 
 
-_clock_lock = threading.Lock()
-_clock_log: collections.deque = collections.deque(maxlen=30)   # in-memory; /api/health shows it
-_started = time.time()
-
-
-def _log(event, **kw):
-    now = pipeline.datetime.now(sources.ET).strftime("%Y-%m-%d %H:%M:%S ET")
-    _clock_log.append({"t": now, "event": event, **kw})
-
-
 def _clock():
-    """Every 5 min while up: in the window and today not yet stored -> snapshot + publish."""
+    """Every 5 min: refresh the GitHub check; in the window with work pending, snapshot + publish."""
     _log("clock started")
     while True:
+        _beat["clock"] = time.time()
         try:
-            if pipeline.in_snapshot_window():
-                today = pipeline.datetime.now(sources.ET).date().isoformat()
-                wl = pipeline.load_watchlist()
-                pending = wl and not all(data.has_chain(t, today) for t in wl)
-                if pending and _clock_lock.acquire(blocking=False):
-                    try:
-                        _log("pass started", date=today)
-                        _log("pass finished", date=today, **pipeline.snapshot_and_publish(wl))
-                    finally:
-                        _clock_lock.release()
+            sources.github_status()   # self-caches 6 h; kept off the request path
+            if pipeline.in_snapshot_window() and pipeline.pending():
+                _log("pass started")
+                _log("pass finished", **pipeline.snapshot_and_publish())
         except Exception as e:   # never let the clock die
-            _log("pass error", error=f"{type(e).__name__}: {e}")
+            _log("pass error", error=f"{type(e).__name__}: {e}"[:300])
         time.sleep(300)
 
 
@@ -84,11 +87,13 @@ def _self_ping():
 @contextlib.asynccontextmanager
 async def _lifespan(_app):
     for target in (_warm, _clock, _self_ping):
-        threading.Thread(target=target, daemon=True).start()   # none may block the health check
+        t = threading.Thread(target=target, name=target.__name__, daemon=True)   # none may block the health check
+        t.start()
+        _threads[target.__name__] = t
     yield
 
 
-app = FastAPI(title="IVchart", version="0.2.2", lifespan=_lifespan)
+app = FastAPI(title="IVchart", version="0.3.0", lifespan=_lifespan)
 
 # Browser access only from the deployed frontend, its Vercel previews, and local dev.
 app.add_middleware(
@@ -105,16 +110,24 @@ _hits: dict[str, collections.deque] = collections.defaultdict(collections.deque)
 _hits_lock = threading.Lock()
 
 
+def _client_ip(request: Request) -> str:
+    """Edge-set headers first: a client can forge XFF's leftmost entry."""
+    h = request.headers
+    ip = h.get("cf-connecting-ip") or h.get("true-client-ip") or (h.get("x-forwarded-for") or "").split(",")[0].strip()
+    return ip or (request.client.host if request.client else "?")
+
+
 @app.middleware("http")
 async def _rate_limit(request: Request, call_next):
-    ip = (request.headers.get("x-forwarded-for") or request.client.host or "?").split(",")[0].strip()
-    now = time.time()
+    if request.url.path == "/api/health":   # Render's health check and the pingers; cheap, never throttled
+        return await call_next(request)
+    ip, now = _client_ip(request), time.time()
     with _hits_lock:
         q = _hits[ip]
         while q and now - q[0] > 60:
             q.popleft()
         if len(q) >= _RATE:
-            return JSONResponse({"detail": "rate limit: 60 requests/min"}, status_code=429)
+            return JSONResponse({"detail": f"rate limit: {_RATE} requests/min"}, status_code=429)
         q.append(now)
         if len(_hits) > 10_000:   # bound memory under a flood of distinct IPs
             _hits.clear()
@@ -131,9 +144,14 @@ def _ticker(raw: str) -> str:
         raise HTTPException(400, "not a ticker symbol")
     return t
 
+
+# ---------------------------------------------------------------- caches
+
 _LIVE_TTL = 300
 _live_cache: dict[str, tuple[float, pd.DataFrame]] = {}
-_build_lock = threading.Lock()   # one metrics build at a time: 512 MB instance
+_yahoo = threading.BoundedSemaphore(3)   # live chain fetches in flight: memory, on a 512 MB box
+_METRICS_TTL = 6 * 3600                  # realized vol moves once a day; a new snapshot expires it early
+_build_lock = threading.Lock()           # one metrics build at a time
 
 
 def _clean(v):
@@ -155,7 +173,12 @@ def _live_chain(ticker):
     now, hit = time.time(), _live_cache.get(ticker)
     if hit and now - hit[0] < _LIVE_TTL:
         return hit[1]
-    chain = sources.fetch_chain(ticker)
+    if not _yahoo.acquire(timeout=30):
+        raise HTTPException(503, "busy -- try again in a moment")
+    try:
+        chain = sources.fetch_chain(ticker)
+    finally:
+        _yahoo.release()
     for k in [k for k, (t, _) in _live_cache.items() if now - t > _LIVE_TTL]:   # evict expired
         _live_cache.pop(k, None)
     if len(_live_cache) >= 32:
@@ -177,16 +200,36 @@ def _fallback_chain(ticker):
     return df, "vendor"
 
 
-def _metrics(ticker, rebuild=False):
-    m = pd.DataFrame() if rebuild else data.read_metrics(ticker)
-    if m.empty:
-        with _build_lock:
-            m = data.read_metrics(ticker)          # another thread may have just built it
-            if m.empty:
-                m = pipeline.build_metrics(ticker)
-                data.write_metrics(ticker, m)
-    return m
+def _metrics(ticker):
+    """Cached, rebuilt past the TTL. A failed rebuild serves the stale copy rather than an error."""
+    def fresh():
+        age = data.metrics_age(ticker)
+        return age is not None and age < _METRICS_TTL
 
+    m = data.read_metrics(ticker)
+    if not m.empty and fresh():
+        return m
+    if not _build_lock.acquire(timeout=60):
+        if not m.empty:
+            return m
+        raise HTTPException(503, "busy building another ticker -- try again in a moment")
+    try:
+        m = data.read_metrics(ticker)          # another request may have just built it
+        if not m.empty and fresh():
+            return m
+        try:
+            new = pipeline.build_metrics(ticker)
+        except Exception:
+            if m.empty:
+                raise
+            return m
+        data.write_metrics(ticker, new)
+        return new
+    finally:
+        _build_lock.release()
+
+
+# ---------------------------------------------------------------- endpoints
 
 @app.get("/api/tickers")
 def tickers():
@@ -197,12 +240,16 @@ def tickers():
 
 
 @app.get("/api/metrics/{ticker}")
-def metrics(ticker: str, rebuild: bool = False):
+def metrics(ticker: str):
     ticker = _ticker(ticker)
     try:
-        m = _metrics(ticker, rebuild)
+        m = _metrics(ticker)
     except sources.ChainUnavailable as e:
         raise HTTPException(404, str(e))
+    except HTTPException:
+        raise
+    except Exception as e:   # Yahoo/FRED hiccup with nothing cached: retryable, not a 500
+        raise HTTPException(503, f"could not build {ticker} right now ({type(e).__name__}) -- try again shortly")
 
     def last(col):
         s = m[col].dropna() if col in m else pd.Series(dtype=float)
@@ -229,18 +276,22 @@ def metrics(ticker: str, rebuild: bool = False):
 
 @app.get("/api/smile/{ticker}")
 def smile(ticker: str, expiries: int = Query(4, ge=1, le=8)):
-    """Today's smile if the market is open, else the last stored chain."""
+    """Today's smile if the market is open, else (or if Yahoo fails) the last stored chain."""
     ticker = _ticker(ticker)
+    state, reason = None, None
     try:
         chain, source = _live_chain(ticker), "live"
+        state = str(chain["MARKET_STATE"].iloc[0])
         if not sources.is_live(chain):
-            state = str(chain["MARKET_STATE"].iloc[0])
-            chain, source = _fallback_chain(ticker)
-            if chain.empty:
-                return {"ticker": ticker, "available": False, "market_state": state,
-                        "reason": f"market is {state} and no chain is stored yet"}
+            reason = f"market is {state} and no chain is stored yet"
     except sources.ChainUnavailable as e:
-        raise HTTPException(404, str(e))
+        reason = str(e)
+    except Exception as e:   # Yahoo down, rate-limited, or we're busy: a stored chain beats an error
+        reason = f"live quotes unavailable ({getattr(e, 'detail', None) or type(e).__name__}) and no chain is stored yet"
+    if reason:
+        chain, source = _fallback_chain(ticker)
+        if chain.empty:
+            return {"ticker": ticker, "available": False, "market_state": state, "reason": reason}
 
     _, crep = mk.filter_quotes(chain["C_BID"], chain["C_ASK"], dte=chain["DTE"])
     table = surface.build_iv_table(chain)
@@ -276,12 +327,22 @@ def watchlist():
     return pipeline.load_watchlist()
 
 
+_TRACK_PER_HOUR = 5   # site-wide: each add is a commit, and each commit a Render redeploy (build minutes)
+_tracked: collections.deque = collections.deque()
+
+
 @app.post("/api/watchlist/{ticker}")
 def track(ticker: str):
     """Local: append to app/watchlist.txt. Deployed (GITHUB_TOKEN set): commit to the repo."""
     t = _ticker(ticker)
     if not t.isalnum() or len(t) > 6:
         raise HTTPException(400, "not a ticker symbol")
+    now = time.time()
+    with _hits_lock:
+        while _tracked and now - _tracked[0] > 3600:
+            _tracked.popleft()
+        if len(_tracked) >= _TRACK_PER_HOUR:
+            raise HTTPException(429, f"{_TRACK_PER_HOUR} tickers were added in the last hour -- try again later")
     if sources.github_configured():
         try:
             sources.fetch_chain(t, max_expiries=1)
@@ -291,24 +352,53 @@ def track(ticker: str):
     else:
         added, detail = pipeline.add_to_watchlist(t)
     wl = pipeline.load_watchlist()
-    if added and t not in wl:   # github path: local file lags the commit until redeploy
-        wl.append(t)
+    if added:
+        _tracked.append(now)
+        if t not in wl:   # github path: local file lags the commit until redeploy
+            wl.append(t)
     return {"added": added, "detail": detail, "watchlist": wl,
             "via": "github" if sources.github_configured() else "local"}
 
 
-@app.post("/api/snapshot/{ticker}")
-def take_snapshot(ticker: str):
-    ticker = _ticker(ticker)
-    status, detail = pipeline.snapshot_one(ticker, force=False)   # force is local-only; never over HTTP
-    if status == "stored":
-        _live_cache.pop(ticker, None)
-    return {"status": status, "detail": detail}
+# ---------------------------------------------------------------- health
+
+def _installed(pkg):
+    try:
+        return version(pkg)
+    except PackageNotFoundError:
+        return None
+
+
+_PINS = dict(re.findall(r"^([\w.-]+)==(\S+)", (Path(__file__).parent / "constraints.txt").read_text(), re.M))
+_VERSIONS = {"python": platform.python_version(), **{p: _installed(p) for p in [*_PINS, "yfinance"]},
+             "numba_threads": numba.config.NUMBA_NUM_THREADS}
+_UNPINNED = sorted(p for p, v in _PINS.items() if _VERSIONS[p] != v)   # [] on Render = the tested set
 
 
 @app.get("/api/health")
-def health():
+def health(strict: bool = False):
+    """Always 200 for Render's health check and the keep-alive. ?strict=1 is 503 while `problems` is
+    non-empty: point a daily monitor there."""
     days = [d for t in data.tickers() for d in data.chain_days(t)]
-    return {"ok": True, "version": app.version, "uptime_s": int(time.time() - _started),
-            "tickers_stored": len(data.tickers()), "last_snapshot": max(days) if days else None,
-            "in_window": pipeline.in_snapshot_window(), "clock_log": list(_clock_log)}
+    last = max(days) if days else None
+    gh = sources.github_status(max_age=float("inf"))   # read-only; the clock refreshes it
+    problems = []
+    if n := pipeline.missed_sessions(last):
+        problems.append(f"{n} trading day(s) since {last} without a snapshot")
+    if os.environ.get("RENDER"):   # deployed: snapshots must be able to commit
+        if gh["ok"] is False or not sources.github_configured():
+            problems.append(gh["error"])
+        elif gh["expires"] and (date.fromisoformat(gh["expires"]) - date.today()).days <= 14:
+            problems.append(f"GitHub token expires {gh['expires']}: regenerate it, update GITHUB_TOKEN on Render")
+    clock = _threads.get("_clock")
+    if clock is not None and (not clock.is_alive() or time.time() - _beat["clock"] > 7200):
+        problems.append("snapshot clock is not running")
+    if pipeline.unpublished:
+        problems.append(f"{len(pipeline.unpublished)} chains fetched but not committed (GitHub failing)")
+    wl = pipeline.load_watchlist()
+    body = {"ok": not problems, "problems": problems, "version": app.version, "uptime_s": int(time.time() - _started),
+            "last_snapshot": last, "missing_last": [t for t in wl if last and not data.has_chain(t, last)],
+            "tickers_stored": len(data.tickers()), "in_window": pipeline.in_snapshot_window(),
+            "github": {k: gh[k] for k in ("ok", "expires", "error")},
+            "versions": _VERSIONS, "unpinned": _UNPINNED, "clock_log": list(_clock_log)}
+    return JSONResponse(body, status_code=503 if strict and problems else 200)

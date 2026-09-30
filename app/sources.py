@@ -147,10 +147,11 @@ def parse_fred(csv_text: str) -> pd.Series:
     return s.dropna()
 
 
-# ---------------------------------------------------------------- github (deployed watchlist)
-# Deployed API and the snapshot Action share no disk, only the repo. "Track" commits
-# the ticker via the Contents API; the Action reads it next run. Env: GITHUB_REPO,
-# GITHUB_TOKEN (fine-grained, Contents r/w on this repo), GITHUB_BRANCH (default main).
+# ---------------------------------------------------------------- github (the deployed store)
+# Render's disk is ephemeral; the repo is the store. Track commits the watchlist (Contents
+# API), snapshots commit chains (Git Data API), and each commit redeploys Render, so the
+# instance's disk mirrors the repo. Env: GITHUB_REPO, GITHUB_TOKEN (fine-grained, Contents
+# r/w on this repo), GITHUB_BRANCH (default main).
 
 WATCHLIST_PATH = "app/watchlist.txt"
 WATCHLIST_MAX = int(os.environ.get("WATCHLIST_MAX", "40"))   # endpoint is public; bound the blast radius
@@ -160,7 +161,7 @@ def github_configured() -> bool:
     return bool(os.environ.get("GITHUB_TOKEN") and os.environ.get("GITHUB_REPO"))
 
 
-def _gh(method: str, url: str, body: dict | None = None) -> dict:
+def _gh(method: str, url: str, body: dict | None = None, with_headers: bool = False):
     req = urllib.request.Request(url, data=json.dumps(body).encode() if body is not None else None,
                                  method=method, headers={
         "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
@@ -168,27 +169,66 @@ def _gh(method: str, url: str, body: dict | None = None) -> dict:
         "X-GitHub-Api-Version": "2022-11-28",
         "Content-Type": "application/json", "User-Agent": "ivchart-api"})
     with urllib.request.urlopen(req, timeout=20) as r:
-        return json.loads(r.read().decode())
+        out = json.loads(r.read().decode())
+        return (out, r.headers) if with_headers else out
+
+
+_status: dict = {"ok": None, "expires": None, "error": "not checked yet", "checked": 0.0}
+
+
+def github_status(max_age: float = 6 * 3600) -> dict:
+    """Can the token still reach the repo, and when does it expire? Cached; the clock refreshes it.
+
+    401/403/404 -> ok False (expired, revoked, no access). Network or GitHub 5xx -> unknown, not cached.
+    Expiry comes from the GitHub-Authentication-Token-Expiration header; absent for tokens that never expire.
+    """
+    global _status
+    if not github_configured():
+        return {"ok": None, "expires": None, "error": "GITHUB_TOKEN/GITHUB_REPO not set", "checked": 0.0}
+    if time.time() - _status["checked"] < max_age:
+        return _status
+    try:
+        _, h = _gh("GET", f"https://api.github.com/repos/{os.environ['GITHUB_REPO']}", with_headers=True)
+        exp = h.get("github-authentication-token-expiration")
+        _status = {"ok": True, "expires": exp[:10] if exp else None, "error": None, "checked": time.time()}
+    except urllib.error.HTTPError as e:
+        if e.code not in (401, 403, 404):
+            return {**_status, "error": f"GitHub HTTP {e.code}"}
+        _status = {"ok": False, "expires": None, "error": f"GitHub HTTP {e.code}: token expired, revoked, or lacks repo access",
+                   "checked": time.time()}
+    except Exception as e:
+        return {**_status, "error": f"{type(e).__name__}: {e}"}
+    return _status
 
 
 def _contents_url() -> str:
     return f"https://api.github.com/repos/{os.environ['GITHUB_REPO']}/contents/{WATCHLIST_PATH}"
 
 
-def github_commit_files(files: dict[str, bytes], message: str) -> str:
-    """Commit several files in ONE commit via the Git Data API. Returns the new commit sha."""
+def github_commit_files(files: dict[str, bytes], message: str) -> str | None:
+    """Commit several files in ONE commit via the Git Data API. Returns the sha; None if nothing changed.
+
+    A branch that moved underneath (a Track commit landing mid-publish) is retried on the new head.
+    """
     repo, branch = os.environ["GITHUB_REPO"], os.environ.get("GITHUB_BRANCH", "main")
     base = f"https://api.github.com/repos/{repo}"
-    head = _gh("GET", f"{base}/git/ref/heads/{branch}")["object"]["sha"]
-    base_tree = _gh("GET", f"{base}/git/commits/{head}")["tree"]["sha"]
     tree = [{"path": path, "mode": "100644", "type": "blob",
              "sha": _gh("POST", f"{base}/git/blobs",
                         {"content": base64.b64encode(blob).decode(), "encoding": "base64"})["sha"]}
             for path, blob in files.items()]
-    tree_sha = _gh("POST", f"{base}/git/trees", {"base_tree": base_tree, "tree": tree})["sha"]
-    commit = _gh("POST", f"{base}/git/commits", {"message": message, "tree": tree_sha, "parents": [head]})["sha"]
-    _gh("PATCH", f"{base}/git/refs/heads/{branch}", {"sha": commit, "force": False})
-    return commit
+    for attempt in range(3):
+        head = _gh("GET", f"{base}/git/ref/heads/{branch}")["object"]["sha"]
+        base_tree = _gh("GET", f"{base}/git/commits/{head}")["tree"]["sha"]
+        tree_sha = _gh("POST", f"{base}/git/trees", {"base_tree": base_tree, "tree": tree})["sha"]
+        if tree_sha == base_tree:
+            return None   # repo already has these bytes: no empty commit, no redeploy
+        commit = _gh("POST", f"{base}/git/commits", {"message": message, "tree": tree_sha, "parents": [head]})["sha"]
+        try:
+            _gh("PATCH", f"{base}/git/refs/heads/{branch}", {"sha": commit, "force": False})
+            return commit
+        except urllib.error.HTTPError as e:
+            if e.code != 422 or attempt == 2:   # 422 = not a fast-forward
+                raise
 
 
 def github_append_ticker(ticker: str) -> tuple[bool, str]:

@@ -3,6 +3,8 @@
 Columns match the vendor CSV so any source drops into ivlib unchanged.
 
     data/chains/<TICKER>/<YYYY-MM-DD>.parquet   one compacted chain per day (committed)
+    data/implied.parquet                        engine's daily series, one row per ticker per snapshot
+                                                (committed with the chains, so metrics never re-solve history)
     data/metrics/<TICKER>.parquet               derived series, a cache (ignored)
     data/vendor/aapl_2021_2023.parquet          AAPL 2021-23 vendor chains (committed, 9 MB)
     data/vendor/aapl_2021_2023_implied.parquet  the engine's daily series over those chains,
@@ -11,6 +13,9 @@ Columns match the vendor CSV so any source drops into ivlib unchanged.
 
 from __future__ import annotations
 
+import io
+import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +23,7 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent / "data"
 CHAINS, METRICS = ROOT / "chains", ROOT / "metrics"
+IMPLIED = ROOT / "implied.parquet"
 VENDOR = ROOT / "vendor" / "aapl_2021_2023.parquet"
 VENDOR_IMPLIED = ROOT / "vendor" / "aapl_2021_2023_implied.parquet"
 VENDOR_LASTDAY = ROOT / "vendor" / "aapl_2021_2023_lastday.parquet"
@@ -71,8 +77,26 @@ def compact(df: pd.DataFrame, moneyness=0.30, max_dte=400) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
-def _widen(df: pd.DataFrame) -> pd.DataFrame:
+def widen(df: pd.DataFrame) -> pd.DataFrame:
     return df.astype({c: "float64" for c in df.select_dtypes("float32").columns})
+
+
+# ---------------------------------------------------------------- files
+
+def to_bytes(df: pd.DataFrame, index: bool = False) -> bytes:
+    """Parquet bytes, so a file can be committed before it exists locally."""
+    buf = io.BytesIO()
+    df.to_parquet(buf, compression="zstd", index=index)
+    return buf.getvalue()
+
+
+def write_bytes(path: Path, blob: bytes) -> Path:
+    """Atomic: a crash mid-write never leaves a torn parquet behind."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_bytes(blob)
+    tmp.replace(path)
+    return path
 
 
 # ---------------------------------------------------------------- chains
@@ -83,9 +107,7 @@ def chain_path(ticker: str, day: str) -> Path:
 
 def write_chain(chain: pd.DataFrame) -> Path:
     p = chain_path(str(chain["TICKER"].iloc[0]), str(chain["QUOTE_DATE"].iloc[0]))
-    p.parent.mkdir(parents=True, exist_ok=True)
-    chain.to_parquet(p, compression="zstd", index=False)
-    return p
+    return write_bytes(p, to_bytes(chain))
 
 
 def has_chain(ticker: str, day: str) -> bool:
@@ -97,34 +119,54 @@ def chain_days(ticker: str) -> list[str]:
     return sorted(p.stem for p in d.glob("*.parquet")) if d.exists() else []
 
 
-def read_chains(ticker: str) -> pd.DataFrame:
-    """All stored days for a ticker, float64."""
+def read_chains(ticker: str, days: list[str] | None = None) -> pd.DataFrame:
+    """Stored days for a ticker (all, or just `days`), float64."""
     d = CHAINS / ticker.upper()
     files = sorted(d.glob("*.parquet")) if d.exists() else []
-    return _widen(pd.concat((pd.read_parquet(f) for f in files), ignore_index=True)) if files else pd.DataFrame()
+    if days is not None:
+        files = [f for f in files if f.stem in set(days)]
+    return widen(pd.concat((pd.read_parquet(f) for f in files), ignore_index=True)) if files else pd.DataFrame()
 
 
 def latest_chain(ticker: str) -> pd.DataFrame:
     days = chain_days(ticker)
-    return _widen(pd.read_parquet(chain_path(ticker, days[-1]))) if days else pd.DataFrame()
+    return widen(pd.read_parquet(chain_path(ticker, days[-1]))) if days else pd.DataFrame()
 
 
 def tickers() -> list[str]:
     return sorted(p.name for p in CHAINS.iterdir() if p.is_dir()) if CHAINS.exists() else []
 
 
+# ---------------------------------------------------------------- implied series
+
+def read_implied_all() -> pd.DataFrame:
+    return pd.read_parquet(IMPLIED) if IMPLIED.exists() else pd.DataFrame()
+
+
+def read_implied(ticker: str) -> pd.DataFrame:
+    """One ticker's daily implied rows, indexed by date."""
+    df = read_implied_all()
+    if df.empty:
+        return df
+    out = df[df["ticker"] == ticker.upper()].drop(columns="ticker").set_index("date")
+    out.index = pd.to_datetime(out.index)
+    return out.sort_index()
+
+
+# ---------------------------------------------------------------- vendor
+
 def vendor_history(ticker: str) -> pd.DataFrame:
     """AAPL 2021-23 vendor chains. Same schema, older dates. 548k rows -- avoid in the API."""
     if ticker.upper() != "AAPL" or not VENDOR.exists():
         return pd.DataFrame()
-    return _widen(pd.read_parquet(VENDOR))
+    return widen(pd.read_parquet(VENDOR))
 
 
 def vendor_last_day(ticker: str) -> pd.DataFrame:
     """The vendor dataset's final day (a few hundred rows), precomputed by `pipeline vendor`."""
     if ticker.upper() != "AAPL" or not VENDOR_LASTDAY.exists():
         return pd.DataFrame()
-    return _widen(pd.read_parquet(VENDOR_LASTDAY))
+    return widen(pd.read_parquet(VENDOR_LASTDAY))
 
 
 def vendor_implied(ticker: str) -> pd.DataFrame:
@@ -136,14 +178,32 @@ def vendor_implied(ticker: str) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- metrics cache
 
+METRICS_MAX = 200   # files; the endpoint takes any ticker, so bound the disk
+
+
 def metrics_path(ticker: str) -> Path:
     return METRICS / f"{ticker.upper()}.parquet"
 
 
-def write_metrics(ticker: str, df: pd.DataFrame) -> Path:
+def metrics_age(ticker: str) -> float | None:
+    """Seconds since the cached metrics were built; None if never."""
+    try:
+        return time.time() - metrics_path(ticker).stat().st_mtime
+    except FileNotFoundError:
+        return None
+
+
+def expire_metrics(ticker: str) -> None:
+    """Stale, not deleted: a failed rebuild can still serve it."""
     p = metrics_path(ticker)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(p, compression="zstd")
+    if p.exists():
+        os.utime(p, (0, 0))
+
+
+def write_metrics(ticker: str, df: pd.DataFrame) -> Path:
+    p = write_bytes(metrics_path(ticker), to_bytes(df, index=True))
+    for f in sorted(METRICS.glob("*.parquet"), key=lambda f: f.stat().st_mtime)[:-METRICS_MAX]:
+        f.unlink(missing_ok=True)   # oldest first
     return p
 
 

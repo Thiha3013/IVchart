@@ -24,5 +24,7 @@ dist/
 !data/chains/**/*.parquet
 # ...and the vendor dataset (9 MB), so deploys and CI get AAPL's 2021-23 history
 !data/vendor/*.parquet
+# ...and the engine's daily series over the chains, committed with them
+!data/implied.parquet
 .vercel
 .env*

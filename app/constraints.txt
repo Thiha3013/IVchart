@@ -1,0 +1,15 @@
+# The tested stack Render and CI install (pip install -c app/constraints.txt ...), so a release can't break a deploy.
+# yfinance floats (<2 in pyproject): Yahoo-side breakage gets fixed there, and any redeploy picks the fix up.
+# Bump: fresh venv, pip install -e ".[app,dev]", run the tests, copy versions from pip freeze.
+numpy==2.4.6
+pandas==3.0.6
+scipy==1.17.1
+numba==0.67.0
+llvmlite==0.49.0
+pyarrow==25.0.1
+fastapi==0.142.2
+starlette==1.7.0
+pydantic==2.13.5
+pydantic_core==2.46.5
+uvicorn==0.54.0
+httpx==0.28.1

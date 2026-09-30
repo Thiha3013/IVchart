@@ -16,6 +16,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [flash, setFlash] = useState<{ ok: boolean; text: string } | null>(null);
+  const [slow, setSlow] = useState(false);
 
   useEffect(() => { api.tickers().then(setKnown).catch(() => {}); }, []);
 
@@ -29,14 +30,14 @@ export default function App() {
     return () => { dead = true; };
   }, [ticker]);
 
-  const submit = (e: React.FormEvent) => { e.preventDefault(); const t = input.trim().toUpperCase(); if (t) setTicker(t); };
+  useEffect(() => {   // free tier sleeps when idle: say so instead of looking broken
+    setSlow(false);
+    if (!loading) return;
+    const t = setTimeout(() => setSlow(true), 4000);
+    return () => clearTimeout(t);
+  }, [loading]);
 
-  const snapshot = async () => {
-    setFlash(null);
-    const r = await api.snapshot(ticker);
-    setFlash({ ok: r.status === "stored", text: r.detail });
-    if (r.status === "stored") { api.metrics(ticker).then(setMetrics); api.smile(ticker).then(setSmile); }
-  };
+  const submit = (e: React.FormEvent) => { e.preventDefault(); const t = input.trim().toUpperCase(); if (t) setTicker(t); };
 
   const track = async () => {
     setFlash(null);
@@ -68,7 +69,6 @@ export default function App() {
           {metrics && !watched && (
             <button type="button" onClick={track} title="Add to the watchlist so the daily snapshot starts building history for it.">Track {ticker}</button>
           )}
-          <button type="button" onClick={snapshot} title="Store today's chain. Only works during regular market hours.">Snapshot now</button>
         </form>
       </header>
 
@@ -88,7 +88,7 @@ export default function App() {
 
       {flash && <div className={`notice ${flash.ok ? "ok" : ""}`}>{flash.text}</div>}
       {error && <div className="notice err">{error}</div>}
-      {loading && <p className="muted">loading {ticker}…</p>}
+      {loading && <p className="muted">loading {ticker}…{slow && " the API sleeps when idle (free tier); waking it can take up to a minute."}</p>}
 
       {s && (
         <>
@@ -103,8 +103,10 @@ export default function App() {
           <h2>Implied vs realized</h2>
           {s.days_implied === 0 && (
             <div className="notice">
-              No implied-vol history for {ticker} yet — realized vol is shown. Implied history begins with the first
-              snapshot: add {ticker} to <code>app/watchlist.txt</code>, or press <b>Snapshot now</b> during market hours.
+              No implied-vol history for {ticker} yet — realized vol is shown.{" "}
+              {watched
+                ? <>{ticker} is tracked: history starts with the next snapshot (trading days, 14:00 ET).</>
+                : <>Press <b>Track {ticker}</b> and it is snapshotted every trading day from the next session.</>}
             </div>
           )}
           {s.cboe_index && (

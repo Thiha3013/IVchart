@@ -50,14 +50,26 @@ export interface Smile {
   curves?: Curve[];
 }
 
-async function get<T>(path: string): Promise<T> {
-  const r = await fetch(BASE + path);
-  if (!r.ok) {
-    let msg = `${r.status}`;
-    try { msg = (await r.json()).detail ?? msg; } catch { /* keep status */ }
-    throw new Error(msg);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Retries what a waking or redeploying API returns (network error, 502-504; 503 = busy), after 3 s then 6 s.
+async function get<T>(path: string, tries = 3): Promise<T> {
+  for (let i = 0; ; i++) {
+    let r: Response;
+    try {
+      r = await fetch(BASE + path);
+    } catch {
+      if (i < tries - 1) { await sleep(3000 * (i + 1)); continue; }
+      throw new Error("API unreachable — try again in a minute");
+    }
+    if ([502, 503, 504].includes(r.status) && i < tries - 1) { await sleep(3000 * (i + 1)); continue; }
+    if (!r.ok) {
+      let msg = `${r.status}`;
+      try { msg = (await r.json()).detail ?? msg; } catch { /* keep status */ }
+      throw new Error(msg);
+    }
+    return r.json();
   }
-  return r.json();
 }
 
 export const api = {
@@ -69,9 +81,5 @@ export const api = {
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail ?? `${r.status}`);
     return j as { added: boolean; detail: string; watchlist: string[] };
-  },
-  snapshot: async (t: string) => {
-    const r = await fetch(BASE + `/api/snapshot/${encodeURIComponent(t)}`, { method: "POST" });
-    return r.json() as Promise<{ status: "stored" | "skipped" | "failed"; detail: string }>;
   },
 };
