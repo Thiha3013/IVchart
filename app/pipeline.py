@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from ivlib import surface
 WATCHLIST = Path(__file__).resolve().parent / "watchlist.txt"
 EARLIEST_ET_HOUR = 14   # store only late-session chains, so snapshot time is consistent day to day
 CLOSE_ET_HOUR = 16
+TICKER_TIMEOUT = 90     # s per ticker; a hung Yahoo call must not stall the whole pass
 WATCHLIST_MAX = sources.WATCHLIST_MAX
 TRADING_DAYS = 252
 RV_WINDOW = 21   # trading days ~ 30 calendar, matching the 30d implied series
@@ -102,17 +104,24 @@ def snapshot_and_publish(tickers: list[str] | None = None) -> dict:
     """
     tickers = tickers or load_watchlist()
     today = datetime.now(sources.ET).date().isoformat()
-    new_files, counts = {}, {"stored": 0, "skipped": 0, "failed": 0}
+    new_files, counts, failures = {}, {"stored": 0, "skipped": 0, "failed": 0}, []
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="snapshot")
     for tk in tickers:
-        status, _ = snapshot_one(tk)
+        try:
+            status, detail = pool.submit(snapshot_one, tk).result(timeout=TICKER_TIMEOUT)
+        except FutureTimeout:
+            status, detail = "failed", f"{tk}: no response in {TICKER_TIMEOUT}s"
+            pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="snapshot")   # abandon the stuck worker
         counts[status] += 1
+        if status == "failed":
+            failures.append(detail)
         time.sleep(1.0)   # spread ~300 Yahoo requests out; a burst gets rate-limited
         if status == "stored":   # repo path is a contract: data/chains/<T>/<day>.parquet
             new_files[f"data/chains/{tk.upper()}/{today}.parquet"] = data.chain_path(tk, today).read_bytes()
     committed = None
     if new_files and sources.github_configured():
         committed = sources.github_commit_files(new_files, f"snapshot {today} ({len(new_files)} tickers)")
-    return {**counts, "committed": committed}
+    return {**counts, "committed": committed, "failures": failures[:5]}
 
 
 def snapshot(tickers: list[str] | None = None, force: bool = False) -> int:

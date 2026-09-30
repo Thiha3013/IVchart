@@ -382,6 +382,36 @@ def test_github_commit_files_builds_one_commit(monkeypatch):
     assert calls.count("POST") == 4 and calls[-1] == "PATCH"     # 2 blobs + tree + commit, then the ref
 
 
+def test_snapshot_and_publish_times_out_a_hung_ticker(tmp_store, monkeypatch):
+    """A Yahoo call that never returns must cost one ticker, not the whole pass."""
+    import threading
+    from datetime import datetime
+    today = datetime.now(yahoo.ET).date().isoformat()
+    monkeypatch.setattr(snapshot, "TICKER_TIMEOUT", 0.2)
+    monkeypatch.setattr(snapshot.time, "sleep", lambda s: None)
+    monkeypatch.setattr(yahoo, "github_configured", lambda: False)
+
+    def fetch(t, **kw):
+        if t == "HANG":
+            threading.Event().wait(2)   # not time.sleep: that's stubbed out above
+        return synth_chain(ticker=t, day=today)
+
+    monkeypatch.setattr(yahoo, "fetch_chain", fetch)
+    out = snapshot.snapshot_and_publish(["HANG", "OK"])
+    assert out["failed"] == 1 and out["stored"] == 1
+    assert "no response" in out["failures"][0]
+
+
+def test_health_reports_last_snapshot_and_clock_log(tmp_store):
+    from app import api
+    store.write_chain(schema.compact(synth_chain(day="2026-03-02")))
+    store.write_chain(schema.compact(synth_chain(day="2026-03-04")))
+    api._log("test event")
+    j = _client().get("/api/health").json()
+    assert j["last_snapshot"] == "2026-03-04" and j["tickers_stored"] == 1
+    assert any(e["event"] == "test event" for e in j["clock_log"])
+
+
 # ------------------------------------------------------------------ fetch retries
 
 class _FakeChain:

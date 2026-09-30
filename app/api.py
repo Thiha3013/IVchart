@@ -33,11 +33,18 @@ def _warm():
 
 
 _clock_lock = threading.Lock()
-_last_publish: dict = {"date": None, "result": None}
+_clock_log: collections.deque = collections.deque(maxlen=30)   # in-memory; /api/health shows it
+_started = time.time()
+
+
+def _log(event, **kw):
+    now = pipeline.datetime.now(sources.ET).strftime("%Y-%m-%d %H:%M:%S ET")
+    _clock_log.append({"t": now, "event": event, **kw})
 
 
 def _clock():
     """Every 5 min while up: in the window and today not yet stored -> snapshot + publish."""
+    _log("clock started")
     while True:
         try:
             if pipeline.in_snapshot_window():
@@ -46,22 +53,42 @@ def _clock():
                 pending = wl and not all(data.has_chain(t, today) for t in wl)
                 if pending and _clock_lock.acquire(blocking=False):
                     try:
-                        _last_publish.update(date=today, result=pipeline.snapshot_and_publish(wl))
+                        _log("pass started", date=today)
+                        _log("pass finished", date=today, **pipeline.snapshot_and_publish(wl))
                     finally:
                         _clock_lock.release()
         except Exception as e:   # never let the clock die
-            _last_publish.update(result={"error": f"{type(e).__name__}: {e}"})
+            _log("pass error", error=f"{type(e).__name__}: {e}")
         time.sleep(300)
+
+
+def _self_ping():
+    """Hit our own public URL every 5 min so Render's idle timer never fires.
+
+    Render sets RENDER_EXTERNAL_URL. Defense in depth next to the external pinger,
+    which lapsed on 2026-09-26 and let the API sleep through the snapshot window.
+    Unverified whether Render counts self-traffic as inbound; if not, harmless.
+    """
+    import urllib.request
+    url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not url:
+        return
+    while True:
+        time.sleep(300)
+        try:
+            urllib.request.urlopen(f"{url}/api/health", timeout=30).read()
+        except Exception:
+            pass
 
 
 @contextlib.asynccontextmanager
 async def _lifespan(_app):
-    threading.Thread(target=_warm, daemon=True).start()    # don't block the health check
-    threading.Thread(target=_clock, daemon=True).start()
+    for target in (_warm, _clock, _self_ping):
+        threading.Thread(target=target, daemon=True).start()   # none may block the health check
     yield
 
 
-app = FastAPI(title="IVchart", version="0.2.1", lifespan=_lifespan)
+app = FastAPI(title="IVchart", version="0.2.2", lifespan=_lifespan)
 
 # Browser access only from the deployed frontend, its Vercel previews, and local dev.
 app.add_middleware(
@@ -281,5 +308,7 @@ def take_snapshot(ticker: str):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "tickers_stored": len(data.tickers()),
-            "in_window": pipeline.in_snapshot_window(), "last_publish": _last_publish}
+    days = [d for t in data.tickers() for d in data.chain_days(t)]
+    return {"ok": True, "version": app.version, "uptime_s": int(time.time() - _started),
+            "tickers_stored": len(data.tickers()), "last_snapshot": max(days) if days else None,
+            "in_window": pipeline.in_snapshot_window(), "clock_log": list(_clock_log)}
